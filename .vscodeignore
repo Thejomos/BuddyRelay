@@ -11,6 +11,8 @@ tsconfig.json
 .github/**
 .gitignore
 .vscodeignore
+.agents/**
+.codebuddy/**
 AGENTS.md
 
 # 工具脚本与测试文件（仅本地开发与门控用，不进入发布包）
