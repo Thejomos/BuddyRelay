@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as path from 'path';
 import { PATHS } from './constants';
+import { atomicWriteFileSync } from './atomicWrite';
 import { readHostLoginUid } from './hostSession';
 
 /**
@@ -142,10 +143,7 @@ function saveCooldownEvents(file: CooldownEventFile): void {
   }
   file.seenRequestIds = file.seenRequestIds.slice(-MAX_SEEN);
   file.updatedAt = now;
-  fs.mkdirSync(path.dirname(PATHS.COOLDOWN_EVENTS_FILE), { recursive: true });
-  const tmp = `${PATHS.COOLDOWN_EVENTS_FILE}.tmp_${process.pid}`;
-  fs.writeFileSync(tmp, JSON.stringify(file, null, 2), 'utf8');
-  fs.renameSync(tmp, PATHS.COOLDOWN_EVENTS_FILE);
+  atomicWriteFileSync(PATHS.COOLDOWN_EVENTS_FILE, JSON.stringify(file, null, 2));
 }
 
 export class CooldownLogWatcher extends EventEmitter {

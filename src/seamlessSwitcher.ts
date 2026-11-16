@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as child_process from 'child_process';
 import { PATHS, PATCH_V5 } from './constants';
+import { atomicWriteFileSync } from './atomicWrite';
 import { CodeBuddyAccount, AccountStore } from './accountStore';
 import { SessionHealer, normalizeLinkTarget } from './sessionHealer';
 import { t } from './i18n';
@@ -145,6 +146,7 @@ export class SeamlessSwitcher {
   private static _preferredRunner = '';
   // 窗口内切号串行队列：消除自动切号与手动切号在 2s 轮询窗口内的指令覆盖竞态
   private _switchQueue: Promise<unknown> = Promise.resolve();
+  private _isSwitching: boolean = false;
 
   constructor(options?: {
     mainJsPath?: string;
@@ -510,10 +512,9 @@ export class SeamlessSwitcher {
       };
     }
 
-    // 替换目标文件
+    // 替换目标文件（任何失败场景都确保清理语法校验临时文件）
     try {
       fs.copyFileSync(tmpWritePath, mainPath);
-      fs.unlinkSync(tmpWritePath);
     } catch (err: any) {
       return {
         success: false,
@@ -523,6 +524,14 @@ export class SeamlessSwitcher {
         detail: err.message,
         error: err.code || 'MAIN_WRITE_FAILED'
       };
+    } finally {
+      try {
+        if (fs.existsSync(tmpWritePath)) {
+          fs.unlinkSync(tmpWritePath);
+        }
+      } catch {
+        // 清理临时文件失败不影响主流程返回
+      }
     }
 
     return {
@@ -898,10 +907,8 @@ export class SeamlessSwitcher {
       from: 'buddy-relay-hub'
     };
 
-    // 原子写入：先写临时文件后重命名
-    const tmpFile = `${targetFile}.tmp_${Date.now()}`;
-    fs.writeFileSync(tmpFile, JSON.stringify(commandPayload, null, 2), 'utf8');
-    fs.renameSync(tmpFile, targetFile);
+    // 原子写入：唯一临时文件 + rename
+    atomicWriteFileSync(targetFile, JSON.stringify(commandPayload, null, 2));
 
     return { file: targetFile, ts: nowMs };
   }
@@ -1003,11 +1010,91 @@ export class SeamlessSwitcher {
     accountOrUid: CodeBuddyAccount | string,
     store?: AccountStore
   ): Promise<SwitchResult> {
-    const run = () => this.doSwitchAccount(accountOrUid, store);
+    const run = async () => {
+      this._isSwitching = true;
+      try {
+        return await this.doSwitchAccount(accountOrUid, store);
+      } finally {
+        this._isSwitching = false;
+      }
+    };
     const next = this._switchQueue.then(run, run);
     // 队列只跟踪完成状态，错误经返回的 Promise 透传给调用方
     this._switchQueue = next.then(() => undefined, () => undefined);
     return next;
+  }
+
+  /**
+   * 读取当前磁盘上待宿主消费的切换指令时间戳；不存在或不可解析返回 null。
+   */
+  public readPendingCommandTs(): number | null {
+    const cmdFile = this.customCmdPath || PATHS.BYOK_SWITCH_FILE;
+    try {
+      if (!fs.existsSync(cmdFile)) return null;
+      const data = JSON.parse(fs.readFileSync(cmdFile, 'utf8'));
+      const ts = Number(data?.ts);
+      return Number.isFinite(ts) && ts > 0 ? ts : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 启动后对齐重启前消费的切换回执：
+   * 若切换指令在完全重启后才被宿主 watcher 自动消费，扩展侧 store 当时未及调用 setActive。
+   * 此处只核对已产生的回执文件并在匹配后清理，绝不凭空覆盖多窗口活跃状态。
+   */
+  public async reconcilePendingSwitch(
+    store: AccountStore,
+    expectedTs?: number
+  ): Promise<CodeBuddyAccount | null> {
+    if (this._isSwitching) {
+      return null;
+    }
+    const receiptFile = PATHS.BYOK_SWITCH_RESULT_FILE;
+    if (!fs.existsSync(receiptFile)) {
+      return null;
+    }
+    let data: any;
+    try {
+      data = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+    } catch {
+      return null;
+    }
+    if (!data || typeof data !== 'object') {
+      return null;
+    }
+
+    const receiptTs = Number(data.ts || 0);
+    if (expectedTs !== undefined && receiptTs !== Number(expectedTs)) {
+      return null;
+    }
+
+    // 防止误消费其他正在进行的指令：若磁盘仍有不同 ts 的待消费指令，暂不清理回执
+    const pendingTs = this.readPendingCommandTs();
+    if (pendingTs !== null && pendingTs !== receiptTs) {
+      return null;
+    }
+
+    // 超出 24 小时的陈旧回执直接清理但不触发自动切换
+    const isFresh = receiptTs > 0 && Date.now() - receiptTs < 24 * 60 * 60 * 1000;
+    try {
+      fs.unlinkSync(receiptFile);
+    } catch {
+      // 忽略删除竞争
+    }
+
+    if (!isFresh || !data.ok || !data.uid) {
+      return null;
+    }
+    const matched = store.get(String(data.uid));
+    if (!matched) {
+      return null;
+    }
+    if (store.getActive()?.uid !== matched.uid) {
+      await store.setActive(matched.id);
+    }
+    return matched;
   }
 
   private async doSwitchAccount(

@@ -1,6 +1,6 @@
 import * as fs from 'fs';
-import * as path from 'path';
 import { PATHS } from './constants';
+import { atomicWriteFileSync } from './atomicWrite';
 import { t } from './i18n';
 
 /**
@@ -44,19 +44,7 @@ function readLockFile(): LockFile {
 
 function writeLockFile(data: LockFile): void {
   try {
-    fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true });
-    const tmp = LOCK_FILE + '.tmp.' + process.pid + '.' + Date.now();
-    const json = JSON.stringify(data, null, 2);
-    fs.writeFileSync(tmp, json, 'utf8');
-    try {
-      fs.renameSync(tmp, LOCK_FILE);
-    } catch (_) {
-      // Windows 下偶发 EPERM/EBUSY（文件被另一窗口读取中），降级直接覆写
-      try { fs.writeFileSync(LOCK_FILE, json, 'utf8'); } catch (writeErr) {
-        console.warn('[accountLock] writeLockFile fallback failed:', writeErr);
-      }
-      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-    }
+    atomicWriteFileSync(LOCK_FILE, JSON.stringify(data, null, 2));
   } catch (err) {
     console.warn('[accountLock] writeLockFile error:', err);
   }

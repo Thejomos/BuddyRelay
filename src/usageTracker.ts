@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { PATHS } from './constants';
+import { atomicWriteFileSync } from './atomicWrite';
 import { CodeBuddyAccount } from './accountStore';
 import { t } from './i18n';
 
@@ -192,19 +193,8 @@ export class UsageTracker {
 
   private saveDailyStats(): void {
     try {
-      const dir = path.dirname(this.dailyStatsPath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
       const payload = JSON.stringify(this.dailyStats, null, 2);
-      const tmp = `${this.dailyStatsPath}.tmp_${Date.now()}`;
-      fs.writeFileSync(tmp, payload, 'utf8');
-      try {
-        fs.renameSync(tmp, this.dailyStatsPath);
-      } catch (_) {
-        fs.writeFileSync(this.dailyStatsPath, payload, 'utf8');
-        try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-      }
+      atomicWriteFileSync(this.dailyStatsPath, payload);
       this.notifyChange();
     } catch (err: any) {
       console.warn('[UsageTracker] 保存今日统计失败:', err.message);
@@ -491,22 +481,11 @@ export class UsageTracker {
 
   private saveModelStats(): void {
     try {
-      const dir = path.dirname(this.modelStatsPath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
       const payload = JSON.stringify(
         { schema: MODEL_STATS_SCHEMA, savedAt: Date.now(), days: this.modelStats.days, syncedDays: this.modelStats.syncedDays },
         null, 2
       );
-      const tmp = `${this.modelStatsPath}.tmp_${Date.now()}`;
-      fs.writeFileSync(tmp, payload, 'utf8');
-      try {
-        fs.renameSync(tmp, this.modelStatsPath);
-      } catch (_) {
-        fs.writeFileSync(this.modelStatsPath, payload, 'utf8');
-        try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-      }
+      atomicWriteFileSync(this.modelStatsPath, payload);
     } catch (err: any) {
       console.warn('[UsageTracker] 保存模型统计失败:', err.message);
     }
@@ -622,22 +601,14 @@ export class UsageTracker {
 
   private save(): void {
     try {
-      const dir = path.dirname(this.filePath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
       // 保持最新 MAX_RECORDS 条
       if (this.records.length > MAX_RECORDS) {
         this.records = this.records.slice(-MAX_RECORDS);
       }
-      const tmp = `${this.filePath}.tmp_${Date.now()}`;
-      fs.writeFileSync(tmp, JSON.stringify({ version: '1.0', updatedAt: Date.now(), records: this.records }, null, 2), 'utf8');
-      try {
-        fs.renameSync(tmp, this.filePath);
-      } catch (_) {
-        fs.writeFileSync(this.filePath, JSON.stringify({ version: '1.0', updatedAt: Date.now(), records: this.records }, null, 2), 'utf8');
-        try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-      }
+      atomicWriteFileSync(
+        this.filePath,
+        JSON.stringify({ version: '1.0', updatedAt: Date.now(), records: this.records }, null, 2)
+      );
     } catch (err: any) {
       console.warn('[UsageTracker] 保存流水记录失败:', err.message);
     }

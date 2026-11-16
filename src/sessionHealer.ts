@@ -16,6 +16,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { PATHS } from './constants';
+import { atomicWriteFileSync } from './atomicWrite';
 
 export interface UidDirInfo {
   uid: string;
@@ -121,13 +122,7 @@ export class SessionHealer {
 
   /** 登记母体 uid（原子写） */
   public registerMaster(uid: string): void {
-    const dir = path.dirname(this.masterFile);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    const tmp = `${this.masterFile}.tmp_${Date.now()}`;
-    fs.writeFileSync(tmp, JSON.stringify({ masterUid: uid, updatedAt: Date.now() }, null, 2), 'utf8');
-    fs.renameSync(tmp, this.masterFile);
+    atomicWriteFileSync(this.masterFile, JSON.stringify({ masterUid: uid, updatedAt: Date.now() }, null, 2));
   }
 
   /** 当前登录 uid（宿主 globalStorage/storage.json 明文） */

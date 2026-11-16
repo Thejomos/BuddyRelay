@@ -4870,6 +4870,10 @@
     window.addEventListener('message', event => {
       const msg = event.data;
       if (msg.command === 'showRestartModal') {
+        if (restartNowBtn) {
+          restartNowBtn.disabled = false;
+          restartNowBtn.textContent = t('ui.restartNow');
+        }
         if (restartModalOverlay) restartModalOverlay.hidden = false;
         return;
       }

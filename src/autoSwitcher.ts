@@ -221,6 +221,58 @@ export class AutoSwitcher extends EventEmitter {
     return null;
   }
 
+  private recordAndEmitSwitchResult(
+    fromUid: string,
+    next: CodeBuddyAccount,
+    reason: RotationEvent['reason'],
+    res: SwitchResult
+  ): void {
+    if (res.success) {
+      if (this.usageTracker) {
+        const current = this.store.get(fromUid);
+        const is429 = reason === 'rate_limited_429';
+        this.usageTracker.recordAction({
+          type: 'switch',
+          accountId: next.id,
+          accountName: next.nickname || next.email,
+          title: is429 ? t('act.autoSwitch429') : t('act.autoSwitchQuota'),
+          detail: is429
+            ? t('act.autoSwitch429Detail', current?.nickname || fromUid, next.nickname || next.email)
+            : t('act.autoSwitchQuotaDetail', current?.nickname || fromUid, next.nickname || next.email)
+        });
+      }
+      this.emit('rotation', {
+        fromUid,
+        toUid: next.uid,
+        targetAccount: next,
+        reason,
+        timestamp: Date.now()
+      } as RotationEvent);
+      return;
+    }
+
+    if (res.needsFullRestart) {
+      this.emit('needs_restart', {
+        fromUid,
+        toUid: next.uid,
+        targetAccount: next,
+        reason,
+        res,
+        timestamp: Date.now()
+      });
+      return;
+    }
+
+    this.emit('rotation_failed', {
+      fromUid,
+      toUid: next.uid,
+      targetAccount: next,
+      reason,
+      res,
+      timestamp: Date.now()
+    });
+  }
+
   /**
    * 触发因额度耗尽引起的平滑热切（带熔断保护与候选预检）
    */
@@ -237,12 +289,7 @@ export class AutoSwitcher extends EventEmitter {
     this.isRotating = true;
 
     try {
-      const current = this.store.get(currentUid);
-      if (current) {
-        await this.store.updateStatus(current.id, 'idle');
-      }
-
-      // 2. 候选探针预检（跳过坏号）
+      // 2. 候选探针预检（跳过坏号；不在切号确认前提前篡改当前账号状态）
       const next = await this.findAndVerifyNextAccount(currentUid);
       if (!next) {
         throw new Error(t('err.noHealthyBackup'));
@@ -250,24 +297,7 @@ export class AutoSwitcher extends EventEmitter {
 
       // 3. 执行底层热切
       const res = await this.switcher.switchAccount(next, this.store);
-
-      if (res.success && this.usageTracker) {
-        this.usageTracker.recordAction({
-          type: 'switch',
-          accountId: next.id,
-          accountName: next.nickname || next.email,
-          title: t('act.autoSwitchQuota'),
-          detail: t('act.autoSwitchQuotaDetail', current?.nickname || currentUid, next.nickname || next.email)
-        });
-      }
-
-      this.emit('rotation', {
-        fromUid: currentUid,
-        toUid: next.uid,
-        targetAccount: next,
-        reason: 'quota_exhausted',
-        timestamp: Date.now()
-      } as RotationEvent);
+      this.recordAndEmitSwitchResult(currentUid, next, 'quota_exhausted', res);
 
       return res;
     } finally {
@@ -303,25 +333,7 @@ export class AutoSwitcher extends EventEmitter {
 
       // 3. 执行底层热切
       const res = await this.switcher.switchAccount(next, this.store);
-
-      const current = this.store.get(currentUid);
-      if (res.success && this.usageTracker) {
-        this.usageTracker.recordAction({
-          type: 'switch',
-          accountId: next.id,
-          accountName: next.nickname || next.email,
-          title: t('act.autoSwitch429'),
-          detail: t('act.autoSwitch429Detail', current?.nickname || currentUid, next.nickname || next.email)
-        });
-      }
-
-      this.emit('rotation', {
-        fromUid: currentUid,
-        toUid: next.uid,
-        targetAccount: next,
-        reason: 'rate_limited_429',
-        timestamp: Date.now()
-      } as RotationEvent);
+      this.recordAndEmitSwitchResult(currentUid, next, 'rate_limited_429', res);
 
       return res;
     } finally {

@@ -397,6 +397,7 @@ function sanitizeErrMessage(msg: string): string {
 }
 
 let isCheckingUpdate = false;
+let isInstallingUpdate = false;
 
 /**
  * 检查更新核心方法
@@ -493,50 +494,57 @@ async function downloadAndInstall(
   version: string,
   isSilentAuto: boolean = false
 ): Promise<void> {
-  const tempDir = os.tmpdir();
-  const vsixPath = path.join(tempDir, `buddy-relay-${version}.vsix`);
-
-  await vscode.window.withProgress(
-    {
-      location: vscode.ProgressLocation.Notification,
-      title: t('upd.downloadingSilent', version),
-      cancellable: false
-    },
-    async () => {
-      await downloadFile(downloadUrl, vsixPath);
-    }
-  );
-
-  await vscode.window.withProgress(
-    {
-      location: vscode.ProgressLocation.Notification,
-      title: t('upd.installing'),
-      cancellable: false
-    },
-    async () => {
-      await vscode.commands.executeCommand(
-        'workbench.extensions.installExtension',
-        vscode.Uri.file(vsixPath)
-      );
-    }
-  );
-
-  const promptMsg = isSilentAuto
-    ? t('upd.autoInstalled', version)
-    : t('upd.installed', version);
-
-  const reloadLabel = t('upd.reloadNow');
-  const reload = await vscode.window.showInformationMessage(
-    promptMsg,
-    reloadLabel,
-    t('common.later')
-  );
-
-  if (reload === reloadLabel) {
-    vscode.commands.executeCommand('workbench.action.reloadWindow');
+  if (isInstallingUpdate) {
+    return;
   }
+  isInstallingUpdate = true;
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'buddy-relay-upd-'));
+  const vsixPath = path.join(tempRoot, `buddy-relay-${version}.vsix`);
 
   try {
-    fs.unlinkSync(vsixPath);
-  } catch (_) {}
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: t('upd.downloadingSilent', version),
+        cancellable: false
+      },
+      async () => {
+        await downloadFile(downloadUrl, vsixPath);
+      }
+    );
+
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: t('upd.installing'),
+        cancellable: false
+      },
+      async () => {
+        await vscode.commands.executeCommand(
+          'workbench.extensions.installExtension',
+          vscode.Uri.file(vsixPath)
+        );
+      }
+    );
+
+    const promptMsg = isSilentAuto
+      ? t('upd.autoInstalled', version)
+      : t('upd.installed', version);
+
+    const reloadLabel = t('upd.reloadNow');
+    const reload = await vscode.window.showInformationMessage(
+      promptMsg,
+      reloadLabel,
+      t('common.later')
+    );
+
+    if (reload === reloadLabel) {
+      vscode.commands.executeCommand('workbench.action.reloadWindow');
+    }
+  } finally {
+    isInstallingUpdate = false;
+    try {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    } catch (_) {}
+  }
 }

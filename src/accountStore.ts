@@ -4,6 +4,7 @@ import * as os from 'os';
 import { EventEmitter } from 'events';
 import type * as vscode from 'vscode';
 import { PATHS } from './constants';
+import { atomicWriteFileSync, cleanStaleTempFiles } from './atomicWrite';
 import { t } from './i18n';
 
 /**
@@ -172,6 +173,7 @@ export class AccountStore extends EventEmitter {
    */
   public load(): void {
     let loaded = false;
+    cleanStaleTempFiles(path.dirname(this.poolFilePath), path.basename(this.poolFilePath));
 
     // 1. 唯一权威：共享号池文件
     if (fs.existsSync(this.poolFilePath)) {
@@ -259,20 +261,8 @@ export class AccountStore extends EventEmitter {
     };
 
     await this.enqueueWrite(async () => {
-      const dir = path.dirname(this.poolFilePath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
       const json = JSON.stringify(payload, null, 2);
-      const tmpPath = `${this.poolFilePath}.tmp_${process.pid}_${Date.now()}`;
-      fs.writeFileSync(tmpPath, json, 'utf8');
-      try {
-        fs.renameSync(tmpPath, this.poolFilePath);
-      } catch (_) {
-        // Windows 偶发 EPERM/EBUSY（另一窗口正在读取），降级直接覆写
-        fs.writeFileSync(this.poolFilePath, json, 'utf8');
-        try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
-      }
+      atomicWriteFileSync(this.poolFilePath, json);
       this._lastWrittenUpdatedAt = payload.updatedAt;
     });
 

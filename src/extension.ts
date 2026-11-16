@@ -18,6 +18,7 @@ import { detectHostEdition } from './host';
 
 let checkinTimer: NodeJS.Timeout | null = null;
 let quotaRefreshTimer: NodeJS.Timeout | null = null;
+let reconcileTimer: NodeJS.Timeout | null = null;
 let checkinScheduler: CheckinScheduler | null = null;
 let statusBarManager: StatusBarManager | null = null;
 let autoSwitcherInstance: AutoSwitcher | null = null;
@@ -121,20 +122,51 @@ export async function activate(context: vscode.ExtensionContext) {
   });
 
   // 3. 自愈检查 main.js Patch v5
+  const pendingStartupTs = switcher.readPendingCommandTs();
   try {
     const patchRes = switcher.healPatch();
     if (patchRes.success) {
       console.log(`[BuddyRelay] ${patchRes.message}`);
-      // 本次实际重打了磁盘补丁：运行中的主进程仍是旧代码。主动告知一次，
+      // 本次实际重打了磁盘补丁：运行中的主进程仍是旧代码。主动告知一次（带一键重启按钮），
       // 避免用户第一次切号白等 8 秒回执才拿到重启引导。
       if (patchRes.repatched) {
-        vscode.window.showInformationMessage(t('sw.restartHint'));
+        void sidebarProvider.promptNativeRestart(t('sw.restartHint'));
       }
     } else {
       console.warn(`[BuddyRelay] Patch 自愈提示: ${patchRes.message}`);
     }
   } catch (err: any) {
     console.warn(`[BuddyRelay] Patch v5 自检异常: ${err.message}`);
+  }
+
+  // 3.1 启动后同步重启前待消费指令的切换结果（确保重开后 UI 高亮账号与宿主真态一致）
+  const syncReconciledUi = (aligned: CodeBuddyAccount | null) => {
+    if (aligned) {
+      statusBarManager?.update();
+      sidebarProvider.postStateToWebview();
+    }
+  };
+  switcher.reconcilePendingSwitch(store, pendingStartupTs ?? undefined).then(syncReconciledUi).catch(() => {});
+  if (pendingStartupTs !== null) {
+    let attempts = 0;
+    reconcileTimer = setInterval(async () => {
+      attempts++;
+      try {
+        const aligned = await switcher.reconcilePendingSwitch(store, pendingStartupTs);
+        if (aligned || attempts >= 6) {
+          if (reconcileTimer) {
+            clearInterval(reconcileTimer);
+            reconcileTimer = null;
+          }
+          syncReconciledUi(aligned);
+        }
+      } catch {
+        if (attempts >= 6 && reconcileTimer) {
+          clearInterval(reconcileTimer);
+          reconcileTimer = null;
+        }
+      }
+    }, 600);
   }
 
   // 3.2 会话母体自愈（2026-11-03 事故）：修复旧版硬编码母体建的错误链接，
@@ -331,7 +363,8 @@ export async function activate(context: vscode.ExtensionContext) {
     }, 8000);
   }
 
-  // 7. 自动轮换事件 → webview toast 通知
+  // 7. 自动轮换事件 → webview toast 通知（仅真切换成功才发成功通知）
+  let lastAutoRestartHintAt = 0;
   autoSwitcher.on('rotation', (ev: any) => {
     const notifyEnabled = vscode.workspace
       .getConfiguration('buddyRelay')
@@ -350,6 +383,19 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     statusBarManager?.update();
     sidebarProvider.postStateToWebview();
+  });
+  autoSwitcher.on('needs_restart', () => {
+    // 防每分钟巡检连续弹窗骚扰：10 分钟内至多主动弹一次重启引导
+    const now = Date.now();
+    if (now - lastAutoRestartHintAt >= 10 * 60 * 1000) {
+      lastAutoRestartHintAt = now;
+      void sidebarProvider.promptFullRestart();
+    }
+  });
+  autoSwitcher.on('rotation_failed', (ev: any) => {
+    const msg = ev?.res?.message || t('err.unknownError');
+    console.warn(`[BuddyRelay][AutoSwitch] 自动切号未生效: ${msg}`);
+    sidebarProvider.sendNotify('error', t('msg.switchFailed', msg), ev?.res?.detail);
   });
 
   // 7. 定时任务：定点自动签到 + 额度守卫自动切换 + 配额刷新
@@ -509,6 +555,10 @@ async function performDailyCheckinIfNeeded(
 }
 
 export function deactivate() {
+  if (reconcileTimer) {
+    clearInterval(reconcileTimer);
+    reconcileTimer = null;
+  }
   if (checkinTimer) {
     clearInterval(checkinTimer);
     checkinTimer = null;

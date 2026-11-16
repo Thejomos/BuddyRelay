@@ -401,13 +401,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * 原生信息提示引导完全重启：附带「立即重启」动作按钮，用户点击直接退出并重开。
+   */
+  public async promptNativeRestart(message: string = t('sw.restartHint')): Promise<void> {
+    const nowLabel = t('ui.restartNow');
+    const laterLabel = t('ui.restartLater');
+    const choice = await vscode.window.showInformationMessage(message, nowLabel, laterLabel);
+    if (choice === nowLabel) {
+      await this.handleRestartApp();
+    }
+  }
+
+  /**
    * 完全重启引导：确认/取消，确认则直接帮用户退出整个应用。
    * 仅在补丁安装/升级后需要一次；之后切号均为无感热切，不再弹出。
+   * 侧栏未展开或当前被切换到后台（visible=false）时退化为带动作按钮的原生通知，绝不吞掉提示。
    */
   public async promptFullRestart(): Promise<void> {
-    if (!this._view) {
-      // 侧栏从未展开过时 webview 承载不了模态框，用原生通知给出同样可照做的指引
-      await vscode.window.showInformationMessage(t('sw.restartHint'));
+    if (!this._view || !this._view.visible) {
+      await this.promptNativeRestart(t('sw.restartHint'));
       return;
     }
     this._view.webview.postMessage({ command: 'showRestartModal' });
@@ -429,30 +441,44 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
    */
   private spawnRestartHelper(): void {
     try {
+      if (!Number.isFinite(process.ppid) || process.ppid <= 1) {
+        return;
+      }
       const dir = PATHS.RELAY_DIR;
       fs.mkdirSync(dir, { recursive: true });
       const helperPath = path.join(dir, 'restart-helper.js');
-      const logPath = path.join(dir, 'restart-helper.log').replace(/\\/g, '\\\\');
+      const logPathJson = JSON.stringify(path.join(dir, 'restart-helper.log'));
+      const exe = process.execPath;
+      const macBundleIdx = process.platform === 'darwin' ? exe.indexOf('.app/Contents/') : -1;
+      const macAppBundle = macBundleIdx > 0 ? exe.slice(0, macBundleIdx + 4) : '';
       fs.writeFileSync(helperPath, [
         "const { spawn } = require('child_process');",
         "const fs = require('fs');",
         'const pid = Number(process.argv[2]);',
         'const exe = process.argv[3];',
-        `const logPath = '${logPath}';`,
+        'const macBundle = process.argv[4] || "";',
+        `const logPath = ${logPathJson};`,
         "const log = m => { try { fs.appendFileSync(logPath, Date.now() + ' ' + m + '\\n'); } catch (_) {} };",
         "log('wait pid=' + pid + ' exe=' + exe);",
         'const t0 = Date.now();',
         'const timer = setInterval(() => {',
         '  let alive = true;',
-        '  try { process.kill(pid, 0); } catch { alive = false; }',
+        "  try { process.kill(pid, 0); } catch (e) { alive = Boolean(e && e.code === 'EPERM'); }",
         '  if (alive && Date.now() - t0 < 120000) return;',
         '  clearInterval(timer);',
         '  if (!alive) {',
         '    setTimeout(() => {',
-        "      try { spawn(exe, [], { detached: true, stdio: 'ignore' }).unref(); log('relaunched'); }",
+        '      try {',
+        '        if (macBundle) {',
+        "          spawn('open', ['-n', '-a', macBundle], { detached: true, stdio: 'ignore' }).unref();",
+        '        } else {',
+        "          spawn(exe, [], { detached: true, stdio: 'ignore' }).unref();",
+        '        }',
+        "        log('relaunched');",
+        '      }',
         "      catch (e) { log('relaunch-failed ' + e.message); }",
         '      process.exit(0);',
-        '    }, 800);',
+        '    }, 1000);',
         '  } else {',
         "    log('timeout waiting exit');",
         '    process.exit(0);',
@@ -461,8 +487,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         ''
       ].join('\n'), 'utf8');
 
-      const exe = process.execPath;
-      const child = child_process.spawn(exe, [helperPath, String(process.ppid), exe], {
+      const child = child_process.spawn(exe, [helperPath, String(process.ppid), exe, macAppBundle], {
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
