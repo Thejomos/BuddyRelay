@@ -2230,10 +2230,67 @@
     }
 
     .icon-btn {
+      width: 26px !important;
+      height: 26px !important;
       display: inline-flex !important;
       align-items: center !important;
       justify-content: center !important;
       flex-shrink: 0 !important;
+    }
+
+    .icon-btn.is-danger-icon:hover {
+      color: var(--tone-danger, #f87171) !important;
+      background: var(--tone-danger-soft, rgba(248, 113, 113, 0.12)) !important;
+    }
+
+    .status-switch {
+      margin-left: 4px !important;
+    }
+
+    .icon-btn.is-spinning svg,
+    .toolbar-icon-btn.is-spinning svg {
+      animation: spin 0.8s linear infinite !important;
+    }
+
+    .icon-btn:disabled,
+    .toolbar-icon-btn:disabled {
+      opacity: 0.55;
+      cursor: wait;
+    }
+
+    .status-toggle-btn.is-done:disabled {
+      cursor: default;
+    }
+
+    .grid-extra-val[data-field="uid"] {
+      cursor: pointer;
+      border-radius: 3px;
+      padding: 0 3px;
+      margin-left: -3px;
+      transition: background 0.12s, color 0.12s;
+    }
+
+    .grid-extra-val[data-field="uid"]:hover {
+      background: var(--hover-bg);
+      color: var(--vscode-foreground);
+    }
+
+    .empty-reset-btn {
+      margin-top: 8px;
+      padding: 4px 12px;
+      font-size: 11px;
+      font-family: inherit;
+      border-radius: 6px;
+      border: 1px solid var(--card-border);
+      background: transparent;
+      color: var(--vscode-foreground);
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+
+    .empty-reset-btn:hover {
+      background: var(--hover-bg);
+      border-color: var(--card-border-hover);
     }
 
     /* 刷新中的旋转反馈 */
@@ -2974,7 +3031,7 @@
                 <span class="settings-field-label">{{i:ui.switchThreshold}}</span>
                 <div class="settings-field-ctrl">
                   <span class="settings-unit-text">&le;</span>
-                  <input type="number" class="settings-num-input" id="setQuotaThreshold" min="1" max="90" style="width:60px;">
+                  <input type="number" class="settings-num-input" id="setQuotaThreshold" min="0" max="90" style="width:60px;">
                   <span class="settings-unit-text">%</span>
                 </div>
               </div>
@@ -3020,7 +3077,7 @@
                 </div>
                 <div>
                   <div class="settings-card-title">{{i:ui.privacySection}}</div>
-                  <div class="settings-card-desc">界面语言与隐私脱敏设置</div>
+                  <div class="settings-card-desc">{{i:ui.privacyDesc}}</div>
                 </div>
               </div>
             </div>
@@ -3053,7 +3110,7 @@
                 </div>
                 <div>
                   <div class="settings-card-title">{{i:ui.updateSection}}</div>
-                  <div class="settings-card-desc">自动检测与安装 GitHub 最新发布版本</div>
+                  <div class="settings-card-desc">{{i:ui.updateDesc}}</div>
                 </div>
               </div>
               <div style="display:flex;align-items:center;gap:8px;">
@@ -3108,6 +3165,10 @@
     let currentSettings = {};
     let privacyMode = false;
     let switchingId = '';
+    let switchElapsed = 0;
+    let checkingId = '';
+    const refreshingIds = new Set();
+    let lastCardsFingerprint = '';
     let activeTag = 'all';
     let searchQuery = '';
 
@@ -3203,7 +3264,12 @@
       toast.querySelector('.toast-close').addEventListener('click', () => removeToast(toast));
       container.appendChild(toast);
       if (key) _toastByKey.set(key, toast);
-      while (container.children.length > 4) removeToast(container.firstElementChild, true);
+      while (container.children.length > 4) {
+        const victim = Array.from(container.children).find(
+          el => el !== toast && !el.classList.contains('toast-error') && !el.classList.contains('toast-with-actions')
+        ) || container.firstElementChild;
+        removeToast(victim, true);
+      }
       requestAnimationFrame(() => toast.classList.add('toast-in'));
       return toast;
     }
@@ -3259,6 +3325,7 @@
           }
         }
         overlay.hidden = false;
+        setTimeout(() => { if (cancelBtn) cancelBtn.focus(); }, 0);
 
         const cleanup = (result) => {
           overlay.hidden = true;
@@ -3266,8 +3333,10 @@
           cancelBtn.onclick = null;
           closeBtn.onclick = null;
           overlay.onclick = null;
+          overlay._cancelConfirm = null;
           resolve(result);
         };
+        overlay._cancelConfirm = () => cleanup(false);
         okBtn.onclick = () => cleanup(true);
         cancelBtn.onclick = () => cleanup(false);
         closeBtn.onclick = () => cleanup(false);
@@ -3393,20 +3462,34 @@
       });
     });
 
+    function readClampedInt(el, fallback, min, max) {
+      const parsed = Number.parseInt(el && el.value, 10);
+      if (!Number.isFinite(parsed)) return fallback;
+      return Math.min(max, Math.max(min, parsed));
+    }
+
     btnSettingsSave.addEventListener('click', () => {
+      const timeText = setDailyTime.value.trim() || '00:10';
+      const timeMatch = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(timeText);
+      if (!timeMatch) {
+        showToast(t('js.invalidDailyTime'), 'error', 10000);
+        setDailyTime.focus();
+        return;
+      }
+      const normalizedTime = timeMatch[1].padStart(2, '0') + ':' + timeMatch[2];
       const s = {
         autoCheckin: setCheckinEnabled.checked,
-        dailyTime: setDailyTime.value.trim() || '00:10',
-        randomJitterMinutes: parseInt(setRandomJitter.value, 10) || 30,
-        perAccountDelaySeconds: parseInt(setPerAccountDelay.value, 10) || 15,
-        refreshIntervalMinutes: parseInt(setRefreshInterval.value, 10) || 15,
+        dailyTime: normalizedTime,
+        randomJitterMinutes: readClampedInt(setRandomJitter, 30, 0, 180),
+        perAccountDelaySeconds: readClampedInt(setPerAccountDelay, 15, 1, 60),
+        refreshIntervalMinutes: readClampedInt(setRefreshInterval, 15, 5, 120),
         growthTasksAutoAfterCheckin: setGrowthAfterCheckin.checked,
         startupMakeup: setStartupMakeup.checked,
         autoUseMakeupCard: setAutoUseMakeupCard.checked,
         autoSwitchEnabled: setAutoSwitchEnabled.checked,
-        quotaThresholdPercent: parseInt(setQuotaThreshold.value, 10) || 10,
+        quotaThresholdPercent: readClampedInt(setQuotaThreshold, 10, 0, 90),
         autoSwitchStrategy: setAutoSwitchStrategy.value,
-        cooldownMinutes: parseInt(setCooldownMinutes.value, 10) || 5,
+        cooldownMinutes: readClampedInt(setCooldownMinutes, 5, 1, 60),
         autoSwitchOn429: setAutoSwitchOn429.checked,
         autoSwitchNotify: setAutoSwitchNotify.checked,
         privacyModeDefault: setPrivacyModeDefault.checked,
@@ -3441,8 +3524,23 @@
       });
     }
 
+    let _refreshAllFallback = 0;
+    function stopRefreshAllSpin() {
+      if (_refreshAllFallback) { clearTimeout(_refreshAllFallback); _refreshAllFallback = 0; }
+      if (refreshAllBtn) {
+        refreshAllBtn.classList.remove('is-spinning');
+        refreshAllBtn.disabled = false;
+      }
+    }
     btnBatchCheckin.addEventListener('click', () => vscode.postMessage({ command: 'batchCheckin' }));
-    refreshAllBtn.addEventListener('click', () => vscode.postMessage({ command: 'refreshStatus' }));
+    refreshAllBtn.addEventListener('click', () => {
+      if (refreshAllBtn.disabled) return;
+      refreshAllBtn.classList.add('is-spinning');
+      refreshAllBtn.disabled = true;
+      if (_refreshAllFallback) clearTimeout(_refreshAllFallback);
+      _refreshAllFallback = setTimeout(stopRefreshAllSpin, 30000);
+      vscode.postMessage({ command: 'refreshStatus' });
+    });
 
     // ── 添加账号模态框（Kite 原版交互） ──
     const addOverlay = document.getElementById('addAccountOverlay');
@@ -3470,7 +3568,6 @@
 
     document.getElementById('addAccountClose').addEventListener('click', closeAddModal);
     addOverlay.addEventListener('click', e => { if (e.target === addOverlay) closeAddModal(); });
-    document.addEventListener('keydown', e => { if (e.key === 'Escape' && !addOverlay.hidden) closeAddModal(); });
 
     btnAddOAuth.addEventListener('click', openAddModal);
     document.getElementById('btnStartOAuth').addEventListener('click', () => {
@@ -3887,17 +3984,24 @@
     };
 
     // ── 搜索 ──
+    function clearSearchInput() {
+      searchInput.value = '';
+      searchQuery = '';
+      searchClear.hidden = true;
+      renderCards();
+    }
     searchInput.addEventListener('input', () => {
       searchQuery = searchInput.value.trim().toLowerCase();
       searchClear.hidden = !searchQuery;
       renderCards();
     });
-    searchClear.addEventListener('click', () => {
-      searchInput.value = '';
-      searchQuery = '';
-      searchClear.hidden = true;
-      renderCards();
+    searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && searchInput.value) {
+        e.stopPropagation();
+        clearSearchInput();
+      }
     });
+    searchClear.addEventListener('click', clearSearchInput);
 
     // ── 标签筛选（支持系统状态标签 + 用户自定义业务标签 Tags 动态提取） ──
     const SYSTEM_TAG_DEFS = [
@@ -4090,7 +4194,9 @@
         list = list.filter(a =>
           (a.nickname || '').toLowerCase().includes(searchQuery) ||
           (a.email || '').toLowerCase().includes(searchQuery) ||
-          (a.uid || '').toLowerCase().includes(searchQuery));
+          (a.uid || '').toLowerCase().includes(searchQuery) ||
+          (a.notes || '').toLowerCase().includes(searchQuery) ||
+          (Array.isArray(a.tags) && a.tags.some(tag => String(tag).toLowerCase().includes(searchQuery))));
       }
       if (activeTag === 'checked') list = list.filter(a => a.todayCheckedIn);
       else if (activeTag === 'unchecked') list = list.filter(a => !a.todayCheckedIn);
@@ -4101,6 +4207,7 @@
       }
 
       if (!currentAccounts || currentAccounts.length === 0) {
+        lastCardsFingerprint = '';
         accountGrid.innerHTML = '';
         emptyState.hidden = false;
         return;
@@ -4108,9 +4215,38 @@
       emptyState.hidden = true;
 
       if (list.length === 0) {
-        accountGrid.innerHTML = '<div class="empty-state">' + t('js.noMatchAccounts') + '</div>';
+        const emptyFp = 'empty#' + activeTag + '#' + searchQuery;
+        if (emptyFp === lastCardsFingerprint && accountGrid.children.length) return;
+        lastCardsFingerprint = emptyFp;
+        accountGrid.innerHTML = '<div class="empty-state"><div>' + escHtml(t('js.noMatchAccounts')) + '</div>'
+          + '<button type="button" class="empty-reset-btn" id="btnResetFilter">' + escHtml(t('js.clearFilterBtn')) + '</button></div>';
         return;
       }
+
+      const cardsFp = [
+        privacyMode ? '1' : '0',
+        activeTag,
+        searchQuery,
+        switchingId,
+        switchingId ? switchElapsed : 0,
+        checkingId,
+        Array.from(refreshingIds).sort().join(','),
+        (currentLockedUids || []).join(','),
+        JSON.stringify(lastCooldownEvents ? lastCooldownEvents.byUid || {} : {}),
+        list.map(a => [
+          a.id, a.uid, a.nickname, a.email, a.status, a.isActive ? 1 : 0,
+          a.totalCredits, a.todayConsumed, a.todayGrants, a.todayCheckedIn ? 1 : 0,
+          a.checkinStreak, a.notes || '', (a.tags || []).join('|'),
+          a.basePackage ? a.basePackage.remain + '/' + a.basePackage.total : '',
+          a.activityPackage ? a.activityPackage.remain + '/' + a.activityPackage.total : ''
+        ].join(':')).join(';')
+      ].join('#');
+      if (cardsFp === lastCardsFingerprint && accountGrid.children.length) {
+        return;
+      }
+      lastCardsFingerprint = cardsFp;
+      const prevGridScroll = accountGrid.scrollTop;
+      const prevDocScroll = window.scrollY || 0;
 
       accountGrid.innerHTML = list.map(acc => {
         const isActive = acc.isActive;
@@ -4156,13 +4292,19 @@
           ? `<div class="grid-card-notes" onclick="onEditMeta('${acc.id}')" title="${escHtml(t('js.notesEditTitle'))}">${escHtml(cleanNotes)}</div>`
           : '';
 
+        const isSwitchingThis = switchingId === acc.id;
+        const switchBtnLabel = isSwitchingThis
+          ? '<span class="btn-mini-spinner"></span>' + escHtml(switchElapsed >= 1 ? t('js.switchingElapsed', switchElapsed) : t('js.switching'))
+          : escHtml(t('js.switchBtn'));
         const leftAction = acc.status === 'expired'
           ? `<button class="grid-switch-btn" style="background:var(--gh-orange, #d97706)!important;" onclick="onReauth('${acc.id}')" title="${escHtml(t('js.reauthTitle'))}">${escHtml(t('js.reauthBtn'))}</button>`
           : (isActive
               ? '<span class="grid-current-label"><span style="color:#3fb950">●</span> ' + escHtml(t('js.inUse')) + '</span>'
-              : `<button class="grid-switch-btn" onclick="onSwitch('${acc.id}')" ${switchingId === acc.id || isDisabled ? 'disabled' : ''} title="${escHtml(isDisabled ? t('js.switchDisabledTitle') : t('js.switchTitle'))}">${switchingId === acc.id ? '<span class="btn-mini-spinner"></span>' + escHtml(t('js.switching')) : escHtml(t('js.switchBtn'))}</button>`);
+              : `<button class="grid-switch-btn" onclick="onSwitch('${acc.id}')" ${isSwitchingThis || isDisabled ? 'disabled' : ''} title="${escHtml(isDisabled ? t('js.switchDisabledTitle') : t('js.switchTitle'))}">${switchBtnLabel}</button>`);
 
-        const checkinBtn = `<button class="status-toggle-btn ${acc.todayCheckedIn ? 'is-enabled is-done' : 'is-disabled is-pending'}" onclick="onCheckin('${acc.id}')" ${acc.todayCheckedIn || isDisabled ? 'disabled' : ''} title="${escHtml(acc.todayCheckedIn ? t('js.checkinDoneTitle') : (isDisabled ? t('js.checkinDisabledTitle') : t('js.checkinDoTitle')))}">${acc.todayCheckedIn ? escHtml(t('js.checkedInShort')) : escHtml(t('js.checkinBtn'))}</button>`;
+        const isCheckingThis = checkingId === acc.id;
+        const checkinBtn = `<button class="status-toggle-btn ${acc.todayCheckedIn ? 'is-enabled is-done' : 'is-disabled is-pending'}" onclick="onCheckin('${acc.id}')" ${acc.todayCheckedIn || isDisabled || isCheckingThis ? 'disabled' : ''} title="${escHtml(acc.todayCheckedIn ? t('js.checkinDoneTitle') : (isDisabled ? t('js.checkinDisabledTitle') : t('js.checkinDoTitle')))}">${isCheckingThis ? '<span class="btn-mini-spinner"></span>' : ''}${acc.todayCheckedIn ? escHtml(t('js.checkedInShort')) : escHtml(t('js.checkinBtn'))}</button>`;
+        const isRefreshingThis = refreshingIds.has(acc.id);
 
         const statusToggleBtn = `<button class="status-switch ${isDisabled ? 'is-off' : 'is-on'}" onclick="onToggleStatus('${acc.id}')" title="${escHtml(isDisabled ? t('js.enableTitle') : t('js.disableTitle'))}" aria-label="${escHtml(isDisabled ? t('js.ariaEnable') : t('js.ariaDisable'))}"><span class="status-switch-thumb"></span></button>`;
 
@@ -4235,10 +4377,10 @@
                 <button class="icon-btn" onclick="onEditMeta('${acc.id}')" title="${escHtml(t('js.editMetaBtnTitle'))}">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                 </button>
-                <button class="icon-btn" onclick="onRefresh('${acc.id}')" title="${escHtml(t('js.refreshOneTitle'))}">
+                <button class="icon-btn ${isRefreshingThis ? 'is-spinning' : ''}" onclick="onRefresh('${acc.id}')" ${isRefreshingThis ? 'disabled' : ''} title="${escHtml(t('js.refreshOneTitle'))}">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
                 </button>
-                <button class="icon-btn" onclick="onDelete('${acc.id}')" title="${escHtml(t('js.removeTitle'))}">
+                <button class="icon-btn is-danger-icon" onclick="onDelete('${acc.id}')" title="${escHtml(t('js.removeTitle'))}">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                 </button>
                 ${statusToggleBtn}
@@ -4247,6 +4389,38 @@
           </div>
         `;
       }).join('');
+      accountGrid.querySelectorAll('[data-field="uid"]').forEach(el => {
+        el.title = t('js.copyUidTitle');
+      });
+      accountGrid.scrollTop = prevGridScroll;
+      if (window.scrollY !== prevDocScroll) window.scrollTo(0, prevDocScroll);
+    }
+
+    if (accountGrid) {
+      accountGrid.addEventListener('click', (e) => {
+        const resetBtn = e.target.closest ? e.target.closest('#btnResetFilter') : null;
+        if (resetBtn) {
+          activeTag = 'all';
+          const st = vscode.getState() || {};
+          st.activeTag = 'all';
+          vscode.setState(st);
+          searchInput.value = '';
+          searchQuery = '';
+          searchClear.hidden = true;
+          renderCards();
+          return;
+        }
+        const uidEl = e.target.closest ? e.target.closest('[data-field="uid"]') : null;
+        if (uidEl) {
+          const card = uidEl.closest('.grid-card');
+          const id = card ? card.getAttribute('data-id') : '';
+          const acc = currentAccounts.find(a => a.id === id);
+          if (acc && acc.uid) {
+            vscode.postMessage({ command: 'copyText', text: acc.uid });
+            showToast(t('js.uidCopied'), 'success', 1800, 'uid-copy');
+          }
+        }
+      });
     }
 
     window.onToggleStatus = function(id) {
@@ -4254,20 +4428,44 @@
     };
 
     let _switchTimeout = null;
+    let _switchTicker = null;
+    function clearSwitchPending() {
+      switchingId = '';
+      switchElapsed = 0;
+      if (_switchTimeout) { clearTimeout(_switchTimeout); _switchTimeout = null; }
+      if (_switchTicker) { clearInterval(_switchTicker); _switchTicker = null; }
+    }
     window.onSwitch = function(id) {
+      clearSwitchPending();
       switchingId = id;
+      switchElapsed = 0;
       renderCards();
       vscode.postMessage({ command: 'switchAccount', accountId: id });
-      if (_switchTimeout) clearTimeout(_switchTimeout);
+      _switchTicker = setInterval(() => {
+        if (switchingId !== id) {
+          if (_switchTicker) { clearInterval(_switchTicker); _switchTicker = null; }
+          return;
+        }
+        switchElapsed += 1;
+        renderCards();
+      }, 1000);
       _switchTimeout = setTimeout(() => {
         if (switchingId === id) {
-          switchingId = '';
+          clearSwitchPending();
           renderCards();
         }
-      }, 6000);
+      }, 12000);
     };
 
+    let _checkinFallback = 0;
     window.onCheckin = function(id) {
+      if (checkingId === id) return;
+      checkingId = id;
+      renderCards();
+      if (_checkinFallback) clearTimeout(_checkinFallback);
+      _checkinFallback = setTimeout(() => {
+        if (checkingId === id) { checkingId = ''; renderCards(); }
+      }, 15000);
       vscode.postMessage({ command: 'checkinAccount', accountId: id });
     };
 
@@ -4282,7 +4480,13 @@
     };
 
     window.onRefresh = function(id) {
-      vscode.postMessage({ command: 'refreshStatus' });
+      if (!id || refreshingIds.has(id)) return;
+      refreshingIds.add(id);
+      renderCards();
+      setTimeout(() => {
+        if (refreshingIds.delete(id)) renderCards();
+      }, 15000);
+      vscode.postMessage({ command: 'refreshAccount', accountId: id });
     };
 
     // ── 原地重新授权 ──
@@ -4693,12 +4897,44 @@
       usageModalCancel.addEventListener('click', closeUsageModal);
     }
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
-        if (usageModalOverlay && !usageModalOverlay.hidden) {
-          closeUsageModal();
-        } else if (settingsModalOverlay && !settingsModalOverlay.hidden) {
-          closeSettingsModal();
-        }
+      if (e.key !== 'Escape') return;
+      const confirmEl = document.getElementById('confirmOverlay');
+      if (confirmEl && !confirmEl.hidden) {
+        if (typeof confirmEl._cancelConfirm === 'function') confirmEl._cancelConfirm();
+        return;
+      }
+      if (taskProgressOverlay && !taskProgressOverlay.hidden) {
+        if (!taskResultStage.hidden) closeTaskResult();
+        return;
+      }
+      if (restartModalOverlay && !restartModalOverlay.hidden) {
+        restartModalOverlay.hidden = true;
+        return;
+      }
+      if (editMetaModalOverlay && !editMetaModalOverlay.hidden) {
+        editMetaModalOverlay.hidden = true;
+        return;
+      }
+      if (exportModalOverlay && !exportModalOverlay.hidden) {
+        exportModalOverlay.hidden = true;
+        return;
+      }
+      if (addOverlay && !addOverlay.hidden) {
+        closeAddModal();
+        return;
+      }
+      if (usageModalOverlay && !usageModalOverlay.hidden) {
+        closeUsageModal();
+        return;
+      }
+      if (settingsModalOverlay && !settingsModalOverlay.hidden) {
+        closeSettingsModal();
+        return;
+      }
+      if (taskModalOverlay && !taskModalOverlay.hidden) {
+        taskModalOverlay.hidden = true;
+        taskAccountBar.classList.remove('is-expanded');
+        taskAccountDrawer.hidden = true;
       }
     });
 
@@ -4762,6 +4998,9 @@
     const btnDoctor = document.getElementById('btnDoctor');
     if (btnDoctor) {
       btnDoctor.addEventListener('click', () => {
+        if (btnDoctor.disabled) return;
+        btnDoctor.disabled = true;
+        setTimeout(() => { btnDoctor.disabled = false; }, 1200);
         vscode.postMessage({ command: 'runDoctor' });
       });
     }
@@ -4816,6 +5055,7 @@
       editMetaTags.value = Array.isArray(acc.tags) ? acc.tags.join(' ') : '';
       editMetaNotes.value = acc.notes || '';
       editMetaModalOverlay.hidden = false;
+      setTimeout(() => { if (editMetaTags) editMetaTags.focus(); }, 0);
     };
 
     if (editMetaClose) {
@@ -4916,9 +5156,11 @@
           showToast(operationMessage || t('js.operatingFallback'), 'loading', 0, 'op');
         } else {
           removeToastByKey('op');
+          stopRefreshAllSpin();
+          checkingId = '';
+          refreshingIds.clear();
           if (switchingId) {
-            switchingId = '';
-            if (_switchTimeout) clearTimeout(_switchTimeout);
+            clearSwitchPending();
           }
         }
 
@@ -4934,17 +5176,23 @@
           }
         }
       } else if (msg.command === 'notify') {
-        if (switchingId) {
-          switchingId = '';
-          if (_switchTimeout) clearTimeout(_switchTimeout);
+        stopRefreshAllSpin();
+        let needCardRedraw = false;
+        if (checkingId || refreshingIds.size > 0 || switchingId) {
+          checkingId = '';
+          refreshingIds.clear();
+          clearSwitchPending();
+          needCardRedraw = true;
+        }
+        if (needCardRedraw) {
           renderCards();
         }
-        // 带诊断详情的错误不自动消失，直到用户手动关闭：15 秒太容易错过，
-        // 错过就意味着这条错误再也没法复制出来了
+        // 带诊断详情的错误不自动消失；普通错误/警告保护期至少 10 秒，避免一闪而过错过报错
+        const ttl = msg.detail ? 0 : ((msg.level === 'error' || msg.level === 'warn') ? 10000 : 3200);
         showToast(
           msg.message,
           msg.level === 'success' ? 'success' : (msg.level === 'warn' ? 'warn' : 'error'),
-          msg.detail ? 0 : 3200,
+          ttl,
           '',
           msg.detail || ''
         );

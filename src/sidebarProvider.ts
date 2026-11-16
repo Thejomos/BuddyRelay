@@ -116,6 +116,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           await this.handleRefreshStatus();
           break;
 
+        case 'refreshAccount':
+          await this.handleRefreshAccount(String(message.accountId || ''));
+          break;
+
         case 'refreshModelStats':
           await this.handleRefreshModelStats(Number(message.days) || 7, message.force === true);
           break;
@@ -688,6 +692,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       }
     } catch (err: any) {
       console.warn('[SidebarProvider] 模型统计拉取失败:', err.message);
+    }
+  }
+
+  /**
+   * 7.1 单卡精准刷新：仅同步指定账号配额与签到状态，避免全号池并发拉取
+   */
+  public async handleRefreshAccount(accountId: string): Promise<void> {
+    const target = this.store.get(accountId);
+    if (!target) {
+      this.sendNotify('error', t('err.targetMissing'));
+      return;
+    }
+    try {
+      await this.checkinService.syncAccountStatus(target, this.store);
+      this.refreshUsageStats(false);
+      this.postStateToWebview();
+      this.sendNotify('success', t('msg.refreshOneDone', target.nickname || target.email));
+    } catch (err: any) {
+      this.sendNotify('error', t('err.refreshFailed', err.message));
     }
   }
 

@@ -7,6 +7,7 @@ import { isTodayCheckedIn } from './checkinService';
 import { showFailureWithActions } from './diagnostics';
 import { UsageTracker } from './usageTracker';
 import { loadCooldownEvents } from './cooldownLogWatcher';
+import { getOtherLockedUids } from './accountLock';
 
 interface AccountQuickPickItem extends vscode.QuickPickItem {
   actionType: 'account' | 'action';
@@ -156,12 +157,14 @@ export class StatusBarManager implements vscode.Disposable {
     const accounts = this.store.getAll();
     const isPrivacy = this.store.getPrivacyMode();
     const isCnHost = detectHostEdition() === 'cn';
+    const otherLocked = getOtherLockedUids();
 
     const items: AccountQuickPickItem[] = [];
 
     if (accounts.length > 0) {
       for (const acc of accounts) {
         const isActive = acc.status === 'active';
+        const isLockedElsewhere = !isActive && otherLocked.has(acc.uid);
         const rawName = acc.nickname || acc.email;
         const labelName = isPrivacy ? maskName(rawName) : rawName;
         const displayUid = isPrivacy ? maskUid(acc.uid) : `${acc.uid.slice(0, 8)}...`;
@@ -189,7 +192,7 @@ export class StatusBarManager implements vscode.Disposable {
 
         items.push({
           label: `${icon} ${labelName}`,
-          description: `[${statusLabel}] ${creditsStr}`,
+          description: `[${statusLabel}] ${creditsStr}${isLockedElsewhere ? t('qp.lockedElsewhere') : ''}`,
           detail: t('qp.detailStreak', displayUid, acc.checkinStreak || 0, isTodayCheckedIn(acc) ? t('qp.checkedToday') : t('qp.notCheckedToday')),
           actionType: 'account',
           account: acc
