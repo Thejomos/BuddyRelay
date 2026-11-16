@@ -672,6 +672,16 @@ export const zh: Record<string, string> = {
   'js.gainedBadgePlain': '新增 +0',
   'js.consumedBadgePlain': '消耗 -0',
 
+  // ── 按需系统提权写补丁 ──
+  'sw.elevateBtn': '授权写入补丁',
+  'sw.elevatePrompt': 'CodeBuddy 安装在系统受保护目录，扩展无直接写入权限。点击「授权写入补丁」会弹出系统管理员确认窗口，仅复制已校验的补丁文件（IDE 仍保持普通权限运行）。',
+  'sw.elevateCancelled': '已取消管理员授权，IDE 文件未被修改',
+  'sw.elevateFailed': '授权写入补丁失败：{0}',
+  'sw.elevateVerifyFailed': '提权命令已结束但目标文件校验未通过，请以管理员身份运行 CodeBuddy 再试',
+  'sw.elevateSuccess': '管理员授权写入补丁成功',
+  'sw.elevateUnsupported': '当前系统未找到提权工具（{0}），请完全退出后以管理员身份运行 CodeBuddy 再试',
+  'sw.elevatingProgress': '正在通过系统授权写入补丁...',
+
   // ── 国际版适配 ──
   'intl.cnOnlyTitle': '仅支持国内版账号',
   'intl.cnOnlyDetail': '签到与成长任务为 CodeBuddy 国内版 (codebuddy.cn) 专属能力，国际版账号已自动跳过。',

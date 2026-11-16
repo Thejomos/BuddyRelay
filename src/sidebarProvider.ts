@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as child_process from 'child_process';
 import * as vscode from 'vscode';
 import { AccountStore, CodeBuddyAccount, QuotaPackageItem, maskName, maskUid } from './accountStore';
-import { SeamlessSwitcher } from './seamlessSwitcher';
+import { SeamlessSwitcher, ElevationPlan } from './seamlessSwitcher';
 import { CheckinService, isTodayCheckedIn } from './checkinService';
 import { CockpitImporter } from './cockpitImporter';
 import { OAuthService } from './oauthService';
@@ -34,6 +34,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private isOperating: boolean = false;
   private currentOperationMessage: string = '';
   private _abortTaskBatch: boolean = false;
+  private _isElevating: boolean = false;
   private _relayDir: string = PATHS.RELAY_DIR;
 
   constructor(
@@ -368,6 +369,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     try {
       const res = await this.switcher.switchAccount(target, this.store);
+      if (res.needsElevation && res.elevationPlan) {
+        await this.promptElevationAndApply(res.elevationPlan, target);
+        return;
+      }
       if (res.needsFullRestart) {
         // 补丁本次重打：指令已就位，重启后自动完成切号。模态框引导用户一键完全退出
         await this.promptFullRestart();
@@ -378,8 +383,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           t('msg.switched', target.nickname || target.email)
         );
       } else {
-        // 切号失败自动跑链路自检：可引导的直接弹重启模态框，其余原样报错
+        // 切号失败自动跑链路自检：可引导的直接弹授权/重启，其余原样报错
         const doc = this.switcher.runDoctor();
+        if (doc.status === 'needs_elevation' && doc.elevationPlan) {
+          await this.promptElevationAndApply(doc.elevationPlan, target);
+          return;
+        }
         if (doc.status === 'needs_full_restart' || doc.status === 'repaired_needs_full_restart') {
           await this.promptFullRestart();
           return;
@@ -394,12 +403,69 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * 受保护安装目录按需单次提权落盘引导：
+   * 仅复制已通过语法校验的补丁到宿主安装目录（IDE 保持普通权限），成功后接续重启引导。
+   */
+  public async promptElevationAndApply(
+    plan: ElevationPlan,
+    pendingAccount?: CodeBuddyAccount
+  ): Promise<boolean> {
+    if (this._isElevating) {
+      return false;
+    }
+    this._isElevating = true;
+    try {
+      const grantLabel = t('sw.elevateBtn');
+      const laterLabel = t('ui.restartLater');
+      const choice = await vscode.window.showWarningMessage(
+        t('sw.elevatePrompt'),
+        grantLabel,
+        laterLabel
+      );
+      if (choice !== grantLabel) {
+        return false;
+      }
+
+      const res = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: t('sw.elevatingProgress'),
+          cancellable: false
+        },
+        async () => this.switcher.completeSwitchAfterElevation(plan, pendingAccount, this.store)
+      );
+
+      if (res.cancelled) {
+        this.sendNotify('warn', t('sw.elevateCancelled'));
+        if (!this._view || !this._view.visible) {
+          void vscode.window.showInformationMessage(t('sw.elevateCancelled'));
+        }
+        return false;
+      }
+
+      if (!res.success) {
+        this.notifySwitchFailure(res.message, res.detail);
+        return false;
+      }
+
+      await this.promptFullRestart();
+      return true;
+    } finally {
+      this._isElevating = false;
+    }
+  }
+
+  /**
    * 链路自检入口（工具栏按钮）：按检查结果分派处理
    */
   public async handleRunDoctor(): Promise<void> {
     const doc = this.switcher.runDoctor();
     if (doc.status === 'healthy') {
       this.sendNotify('success', doc.message);
+      return;
+    }
+    if (doc.status === 'needs_elevation' && doc.elevationPlan) {
+      await this.promptElevationAndApply(doc.elevationPlan);
       return;
     }
     if (doc.status === 'needs_full_restart' || doc.status === 'repaired_needs_full_restart') {

@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { AccountStore, CodeBuddyAccount, maskName, maskUid } from './accountStore';
-import { SeamlessSwitcher } from './seamlessSwitcher';
+import { SeamlessSwitcher, ElevationPlan } from './seamlessSwitcher';
 import { t } from './i18n';
 import { detectHostEdition } from './host';
 import { isTodayCheckedIn } from './checkinService';
@@ -35,6 +35,7 @@ export class StatusBarManager implements vscode.Disposable {
   private store: AccountStore;
   private switcher: SeamlessSwitcher;
   private restartPrompt: () => Promise<void>;
+  private elevationPrompt?: (plan: ElevationPlan, account: CodeBuddyAccount) => Promise<void>;
   private usageTracker?: UsageTracker;
   private disposables: vscode.Disposable[] = [];
 
@@ -42,12 +43,14 @@ export class StatusBarManager implements vscode.Disposable {
     store: AccountStore,
     switcher: SeamlessSwitcher,
     restartPrompt: () => Promise<void>,
-    usageTracker?: UsageTracker
+    usageTracker?: UsageTracker,
+    elevationPrompt?: (plan: ElevationPlan, account: CodeBuddyAccount) => Promise<void>
   ) {
     this.store = store;
     this.switcher = switcher;
     this.restartPrompt = restartPrompt;
     this.usageTracker = usageTracker;
+    this.elevationPrompt = elevationPrompt;
 
     // 右下角常驻 (vscode.StatusBarAlignment.Right, 优先级 100)
     this.statusBarItem = vscode.window.createStatusBarItem(
@@ -298,6 +301,14 @@ export class StatusBarManager implements vscode.Disposable {
       async (progress) => {
         progress.report({ message: t('msg.progressPatch') });
         const res = await this.switcher.switchAccount(target, this.store);
+        if (res.needsElevation && res.elevationPlan) {
+          if (this.elevationPrompt) {
+            await this.elevationPrompt(res.elevationPlan, target);
+          } else {
+            await showFailureWithActions(t('msg.switchFailed', res.message), res.detail);
+          }
+          return;
+        }
         if (res.needsFullRestart) {
           await this.restartPrompt();
           return;

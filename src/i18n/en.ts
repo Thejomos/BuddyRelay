@@ -669,6 +669,16 @@ export const en: Record<string, string> = {
   'js.gainedBadgePlain': '+0 gained',
   'js.consumedBadgePlain': '-0 used',
 
+  // ── On-demand elevation for protected directories ──
+  'sw.elevateBtn': 'Grant Permission & Patch',
+  'sw.elevatePrompt': 'CodeBuddy is installed in a protected system directory. Click "Grant Permission & Patch" to approve a single OS elevation prompt that copies the validated patch (the IDE stays non-elevated).',
+  'sw.elevateCancelled': 'Administrator authorization cancelled; IDE files untouched',
+  'sw.elevateFailed': 'Elevated patch write failed: {0}',
+  'sw.elevateVerifyFailed': 'Elevation finished but target file verification failed; try running CodeBuddy as administrator once',
+  'sw.elevateSuccess': 'Patch written via administrator authorization',
+  'sw.elevateUnsupported': 'Elevation tool not found ({0}); quit CodeBuddy completely and run it as administrator once',
+  'sw.elevatingProgress': 'Writing patch with system authorization...',
+
   // ── International edition ──
   'intl.cnOnlyTitle': 'CN accounts only',
   'intl.cnOnlyDetail': 'Check-in & growth tasks are CodeBuddy CN (codebuddy.cn) features; international accounts were skipped.',

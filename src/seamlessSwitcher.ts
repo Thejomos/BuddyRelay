@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as child_process from 'child_process';
 import { PATHS, PATCH_V5 } from './constants';
@@ -18,12 +19,135 @@ export interface PatchCheckResult {
   message: string;
 }
 
+export interface ElevationPlan {
+  mainJsPath: string;
+  originPath?: string;
+  stagedMainPath: string;
+  stagedOriginPath?: string;
+  backupCreated: boolean;
+}
+
+export interface ElevatedApplyResult {
+  success: boolean;
+  cancelled?: boolean;
+  mainJsPath: string;
+  message: string;
+  detail?: string;
+  error?: string;
+}
+
+export interface ElevateRunResult {
+  code: number;
+  cancelled?: boolean;
+  stdout?: string;
+  stderr?: string;
+}
+
+export type ElevateRunner = (plan: ElevationPlan) => Promise<ElevateRunResult>;
+
+export interface ElevationArtifacts {
+  scriptPath: string;
+  scriptContent: string;
+  errLogPath: string;
+  command: string;
+  commandArgs: string[];
+}
+
+function escapePsSingle(s: string): string {
+  return String(s).replace(/'/g, "''");
+}
+
+function escapeShSingle(s: string): string {
+  return String(s).replace(/'/g, "'\\''");
+}
+
+/**
+ * 构造跨平台系统原生单次提权复制脚本与启动参数
+ * 仅复制扩展侧已完成语法校验的暂存文件至目标宿主目录，绝不以管理员权限运行整个 IDE。
+ */
+export function buildElevationArtifacts(
+  platform: NodeJS.Platform,
+  plan: ElevationPlan,
+  scriptDir: string
+): ElevationArtifacts {
+  const errLogPath = path.join(scriptDir, 'elevate-error.log');
+  if (platform === 'win32') {
+    const scriptPath = path.join(scriptDir, 'elevate-copy.ps1');
+    const sOrigin = plan.stagedOriginPath && plan.originPath ? escapePsSingle(plan.stagedOriginPath) : '';
+    const dOrigin = plan.stagedOriginPath && plan.originPath ? escapePsSingle(plan.originPath) : '';
+    const sMain = escapePsSingle(plan.stagedMainPath);
+    const dMain = escapePsSingle(plan.mainJsPath);
+    const errFile = escapePsSingle(errLogPath);
+    const scriptContent = [
+      "$ErrorActionPreference = 'Stop'",
+      `$errFile = '${errFile}'`,
+      'try {',
+      `  if ('${sOrigin}' -ne '' -and '${dOrigin}' -ne '') {`,
+      `    if (Test-Path -LiteralPath '${dOrigin}') { Set-ItemProperty -LiteralPath '${dOrigin}' -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue }`,
+      `    Copy-Item -LiteralPath '${sOrigin}' -Destination '${dOrigin}' -Force`,
+      '  }',
+      `  if (Test-Path -LiteralPath '${dMain}') { Set-ItemProperty -LiteralPath '${dMain}' -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue }`,
+      `  Copy-Item -LiteralPath '${sMain}' -Destination '${dMain}' -Force`,
+      '} catch {',
+      '  try { [System.IO.File]::WriteAllText($errFile, $_.Exception.Message, [System.Text.Encoding]::UTF8) } catch {}',
+      '  exit 1',
+      '}',
+      ''
+    ].join('\r\n');
+
+    const psExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const resolvedPs = fs.existsSync(psExe) ? psExe : 'powershell.exe';
+    const runnerCmd =
+      `$p = Start-Process -FilePath '${escapePsSingle(resolvedPs)}' ` +
+      `-ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File','${escapePsSingle(scriptPath)}') ` +
+      `-Verb RunAs -Wait -PassThru; ` +
+      'if ($null -eq $p) { exit 1 }; exit $p.ExitCode';
+
+    return {
+      scriptPath,
+      scriptContent,
+      errLogPath,
+      command: resolvedPs,
+      commandArgs: ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-Command', runnerCmd]
+    };
+  }
+
+  const scriptPath = path.join(scriptDir, 'elevate-copy.sh');
+  const lines = ['#!/bin/sh', 'set -e'];
+  if (plan.stagedOriginPath && plan.originPath) {
+    lines.push(`cp -f '${escapeShSingle(plan.stagedOriginPath)}' '${escapeShSingle(plan.originPath)}'`);
+  }
+  lines.push(`cp -f '${escapeShSingle(plan.stagedMainPath)}' '${escapeShSingle(plan.mainJsPath)}'`, '');
+  const scriptContent = lines.join('\n');
+
+  if (platform === 'darwin') {
+    return {
+      scriptPath,
+      scriptContent,
+      errLogPath,
+      command: 'osascript',
+      commandArgs: ['-e', `do shell script "/bin/sh '${escapeShSingle(scriptPath)}'" with administrator privileges`]
+    };
+  }
+
+  return {
+    scriptPath,
+    scriptContent,
+    errLogPath,
+    command: 'pkexec',
+    commandArgs: ['/bin/sh', scriptPath]
+  };
+}
+
 export interface PatchApplyResult {
   success: boolean;
   mainJsPath: string;
   backupCreated: boolean;
   /** 本次是否实际重打了 main.js（true 时运行中的 main 进程仍是旧代码，需完全重启一次） */
   repatched?: boolean;
+  /** 受保护目录无写权限：已生成暂存补丁，可弹系统单次提权窗口写入 */
+  needsElevation?: boolean;
+  elevationPlan?: ElevationPlan;
   message: string;
   error?: string;
   /** 技术细节（语法校验原始输出、尝试过的运行时等）；仅供复制/上报，不直接展示给用户 */
@@ -102,6 +226,7 @@ export type DoctorStatus =
   | 'healthy'
   | 'needs_full_restart'
   | 'repaired_needs_full_restart'
+  | 'needs_elevation'
   | 'main_missing'
   | 'repair_failed';
 
@@ -109,6 +234,7 @@ export interface DoctorReport {
   status: DoctorStatus;
   checks: DoctorCheck[];
   message: string;
+  elevationPlan?: ElevationPlan;
 }
 
 export interface SwitchResult {
@@ -119,6 +245,9 @@ export interface SwitchResult {
   receipt?: SwitchReceipt;
   /** 补丁本次重打：指令已就位，完全重启 CodeBuddy 后 watcher 自动消费完成切换 */
   needsFullRestart?: boolean;
+  /** 受保护目录无写权限：已备好校验后补丁，需引导单次系统授权写入 */
+  needsElevation?: boolean;
+  elevationPlan?: ElevationPlan;
   message: string;
   error?: string;
   /** 技术细节（供复制/上报，不直接展示） */
@@ -141,6 +270,8 @@ export class SeamlessSwitcher {
   private customMainJsPath?: string;
   private appRootPath?: string;
   private customCmdPath?: string;
+  private stagedPatchDir?: string;
+  private customElevateRunner?: ElevateRunner;
   private readonly healer: SessionHealer;
   // 上次校验成功的运行时：避免每次切号都先白跑一次失败分支（Electron 冷启动可达 1~2 秒）
   private static _preferredRunner = '';
@@ -153,10 +284,14 @@ export class SeamlessSwitcher {
     cmdPath?: string;
     healer?: SessionHealer;
     appRoot?: string;
+    stagedPatchDir?: string;
+    elevateRunner?: ElevateRunner;
   }) {
     this.customMainJsPath = options?.mainJsPath;
     this.customCmdPath = options?.cmdPath;
     this.appRootPath = options?.appRoot;
+    this.stagedPatchDir = options?.stagedPatchDir;
+    this.customElevateRunner = options?.elevateRunner;
     this.healer = options?.healer || new SessionHealer();
   }
 
@@ -355,13 +490,11 @@ export class SeamlessSwitcher {
     const originPath = `${mainPath}.byok-origin`;
     let backupCreated = false;
     let src: string;
+    let originToWrite: string | null = null;
     let originReadError = '';
 
-    // 1-2. 逐级取得当前宿主构建的干净源码，所有路径都尝试完成后才允许中止：
-    //  a) 当前 main.js 未注入过结构：直接采用并刷新备份（全新安装 / 宿主升级覆盖 / 手动还原）；
-    //  b) 备份干净：以备份为准（历史结构升级的标准路径）；
-    //  c) 备份缺失或同样带结构：从当前 main.js 还原历史注入内容，校验通过后重建备份。
-    // 装在 Program Files 的用户没有写权限时会直接 EACCES，需翻译成可照做的提示。
+    // 1-2. 逐级取得当前宿主构建的干净源码，所有计算与语法校验均先在内存及系统临时目录完成，
+    // 绝不提前改动受保护目录（如 Program Files）内的 .byok-origin 与 main.js。
     const originExisted = fs.existsSync(originPath);
     try {
       const content = fs.readFileSync(mainPath, 'utf8');
@@ -378,7 +511,7 @@ export class SeamlessSwitcher {
       }
 
       if (!this.hasInjectedPatch(content)) {
-        fs.copyFileSync(mainPath, originPath);
+        originToWrite = content;
         backupCreated = !originExisted;
         src = content;
       } else if (cleanBackup !== null) {
@@ -388,7 +521,7 @@ export class SeamlessSwitcher {
         if (restored === null) {
           throw new Error('SOURCE_RESTORE_FAILED');
         }
-        fs.writeFileSync(originPath, restored, 'utf8');
+        originToWrite = restored;
         backupCreated = !originExisted;
         src = restored;
       }
@@ -406,14 +539,14 @@ export class SeamlessSwitcher {
       return {
         success: false,
         mainJsPath: mainPath,
-        backupCreated,
+        backupCreated: false,
         message: isPermissionError(err) ? t('sw.writePermissionDenied') : t('sw.backupFailed', err.message),
         detail: err.message,
         error: err.code || 'ORIGIN_BACKUP_FAILED'
       };
     }
 
-    // 3. 逐级注入 Patch v5
+    // 3. 逐级注入 Patch v5（纯内存计算）
     const skipNotes: string[] = [];
 
     // (1) 会话服务类构造函数注入全局会话（类名随宿主构建漂移 AM->HM，以特征方法动态发现类头；失败=阻断）
@@ -422,7 +555,7 @@ export class SeamlessSwitcher {
       return {
         success: false,
         mainJsPath: mainPath,
-        backupCreated,
+        backupCreated: false,
         message: t('sw.anchorAmMissing'),
         error: 'AM_ANCHOR_MISSING'
       };
@@ -452,86 +585,99 @@ export class SeamlessSwitcher {
       return {
         success: false,
         mainJsPath: mainPath,
-        backupCreated,
+        backupCreated: false,
         message: t('sw.anchorRestoreMissing'),
         error: 'RESTORE_ANCHOR_MISSING'
       };
     }
     src = src.replace(restoreMatches[0], () => PATCH_V5.WATCHER_METHODS + restoreMatches[0]);
 
-    // (5) 构造函数注入 watcher 启动（restoreSession 前置 await ensureInitialized 为网络初始化，
-    // 挂起或拒绝时 watcher 永不启动——2026-11-02 事故实证；构造函数实例化必然执行，__byokStarted 防重入）
-    // lookahead 锚定：匹配止于 "{"，注入落在构造函数体首句，不破坏首个字段赋值。
-    // 校验与替换必须用同一正则对象——lookahead 语义只存在于正则匹配中，
-    // 若以匹配文本做字面 replace，会撞上同签名但特征不符的其他类（真实宿主含多个 constructor(e,i,s,n)）
+    // (5) 构造函数注入 watcher 启动
     const bootRe = /constructor\([^)]*\)\{(?=this\.instantiationService=)/g;
     const bootMatches = src.match(bootRe) || [];
     if (bootMatches.length !== 1) {
       return {
         success: false,
         mainJsPath: mainPath,
-        backupCreated,
+        backupCreated: false,
         message: t('sw.anchorRestoreMissing'),
         error: 'WATCHER_BOOT_ANCHOR_MISSING'
       };
     }
     src = src.replace(bootRe, (m0) => m0 + 'this.startByokWatcher();');
 
-    // 4. 原子安全写入：文件名必须以 .js 结尾，兼容现代 Node.js ESM/CJS loader 扩展名校验规范
-    const tmpWritePath = `${mainPath}.tmp_${Date.now()}.js`;
+    // 4. 在用户可写的系统临时目录进行语法校验（无需目标安装目录写权限；文件名须以 .js 结尾）
+    const validateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'buddyrelay-validate-'));
+    const validateJsPath = path.join(validateDir, `main.tmp_${Date.now()}.js`);
     try {
-      fs.writeFileSync(tmpWritePath, src, 'utf8');
+      fs.writeFileSync(validateJsPath, src, 'utf8');
+      const checkRes = this.validateSyntax(validateJsPath);
+      if (!checkRes.valid) {
+        return {
+          success: false,
+          mainJsPath: mainPath,
+          backupCreated: false,
+          message: checkRes.reason === 'no_runtime'
+            ? t('sw.checkNoRuntime')
+            : checkRes.reason === 'timeout'
+              ? t('sw.checkTimeout')
+              : t('sw.syntaxCheckFailed'),
+          detail: checkRes.error,
+          error: checkRes.reason === 'no_runtime' ? 'CHECK_RUNTIME_MISSING' : 'SYNTAX_CHECK_FAILED'
+        };
+      }
     } catch (err: any) {
       return {
         success: false,
         mainJsPath: mainPath,
-        backupCreated,
-        message: isPermissionError(err) ? t('sw.writePermissionDenied') : t('sw.writeFailed', err.message),
+        backupCreated: false,
+        message: t('sw.writeFailed', err.message),
         detail: err.message,
         error: err.code || 'TMP_WRITE_FAILED'
       };
+    } finally {
+      try { fs.rmSync(validateDir, { recursive: true, force: true }); } catch { /* ignore */ }
     }
 
-    // 5. Node 语法自检
-    const checkRes = this.validateSyntax(tmpWritePath);
-    if (!checkRes.valid) {
-      if (fs.existsSync(tmpWritePath)) {
-        fs.unlinkSync(tmpWritePath);
+    // 5. 写入干净备份与已校验的 main.js；受保护目录遇 EPERM/EACCES 时转交用户可写暂存区走按需单次系统提权
+    try {
+      if (originToWrite !== null) {
+        atomicWriteFileSync(originPath, originToWrite);
+      }
+      atomicWriteFileSync(mainPath, src);
+    } catch (err: any) {
+      if (isPermissionError(err)) {
+        try {
+          const plan = this.stageElevationPlan(mainPath, originPath, originToWrite, src, backupCreated);
+          return {
+            success: false,
+            mainJsPath: mainPath,
+            backupCreated: false,
+            needsElevation: true,
+            elevationPlan: plan,
+            message: t('sw.writePermissionDenied'),
+            detail: err.message,
+            error: 'NEEDS_ELEVATION'
+          };
+        } catch (stageErr: any) {
+          return {
+            success: false,
+            mainJsPath: mainPath,
+            backupCreated: false,
+            message: t('sw.writePermissionDenied'),
+            detail: `${err.message} | stage: ${stageErr.message}`,
+            error: 'NEEDS_ELEVATION_STAGE_FAILED'
+          };
+        }
       }
       return {
         success: false,
         mainJsPath: mainPath,
         backupCreated,
-        message: checkRes.reason === 'no_runtime'
-          ? t('sw.checkNoRuntime')
-          : checkRes.reason === 'timeout'
-            ? t('sw.checkTimeout')
-            : t('sw.syntaxCheckFailed'),
-        detail: checkRes.error,
-        error: checkRes.reason === 'no_runtime' ? 'CHECK_RUNTIME_MISSING' : 'SYNTAX_CHECK_FAILED'
-      };
-    }
-
-    // 替换目标文件（任何失败场景都确保清理语法校验临时文件）
-    try {
-      fs.copyFileSync(tmpWritePath, mainPath);
-    } catch (err: any) {
-      return {
-        success: false,
-        mainJsPath: mainPath,
-        backupCreated,
-        message: isPermissionError(err) ? t('sw.writePermissionDenied') : t('sw.writeFailed', err.message),
+        message: t('sw.writeFailed', err.message),
         detail: err.message,
         error: err.code || 'MAIN_WRITE_FAILED'
       };
-    } finally {
-      try {
-        if (fs.existsSync(tmpWritePath)) {
-          fs.unlinkSync(tmpWritePath);
-        }
-      } catch {
-        // 清理临时文件失败不影响主流程返回
-      }
     }
 
     return {
@@ -542,6 +688,267 @@ export class SeamlessSwitcher {
       message: skipNotes.length > 0
         ? `${t('sw.patchDone')} ${skipNotes.join(' ')}`
         : t('sw.patchDone')
+    };
+  }
+
+  private resolveStageRoot(): string {
+    if (this.stagedPatchDir) {
+      return this.stagedPatchDir;
+    }
+    try {
+      fs.mkdirSync(PATHS.RELAY_DIR, { recursive: true });
+      return path.join(PATHS.RELAY_DIR, 'pending-patch');
+    } catch {
+      return path.join(os.tmpdir(), 'buddyrelay-pending-patch');
+    }
+  }
+
+  private stageElevationPlan(
+    mainPath: string,
+    originPath: string,
+    originToWrite: string | null,
+    patchedSrc: string,
+    backupCreated: boolean
+  ): ElevationPlan {
+    const dir = this.resolveStageRoot();
+    fs.mkdirSync(dir, { recursive: true });
+    const stagedMainPath = path.join(dir, 'main.patched.js');
+    atomicWriteFileSync(stagedMainPath, patchedSrc);
+
+    let stagedOriginPath: string | undefined;
+    if (originToWrite !== null) {
+      stagedOriginPath = path.join(dir, 'main.byok-origin');
+      atomicWriteFileSync(stagedOriginPath, originToWrite);
+    }
+
+    return {
+      mainJsPath: mainPath,
+      originPath: stagedOriginPath ? originPath : undefined,
+      stagedMainPath,
+      stagedOriginPath,
+      backupCreated
+    };
+  }
+
+  private cleanupElevationPlan(plan: ElevationPlan): void {
+    for (const f of [plan.stagedMainPath, plan.stagedOriginPath]) {
+      if (f) {
+        try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch { /* ignore */ }
+      }
+    }
+  }
+
+  /**
+   * 按需单次系统原生提权落地补丁：
+   * 校验暂存补丁完整与语法合法后，调用 OS 原生提权机制复制覆盖受保护目录，
+   * 并在命令结束后独立核对磁盘字节一致与补丁标记，拒绝假成功。
+   */
+  public async applyElevatedPatch(plan: ElevationPlan): Promise<ElevatedApplyResult> {
+    if (!plan || !plan.mainJsPath || !plan.stagedMainPath || !fs.existsSync(plan.stagedMainPath)) {
+      return {
+        success: false,
+        mainJsPath: plan?.mainJsPath || '',
+        message: t('sw.elevateFailed', 'staged patch missing'),
+        error: 'STAGED_PATCH_MISSING'
+      };
+    }
+
+    let expectedBytes: Buffer;
+    try {
+      expectedBytes = fs.readFileSync(plan.stagedMainPath);
+      const text = expectedBytes.toString('utf8');
+      if (!text.includes(PATCH_V5.PATCH_FLAG) || !text.includes(PATCH_V5.V5_MARKER)) {
+        return {
+          success: false,
+          mainJsPath: plan.mainJsPath,
+          message: t('sw.elevateFailed', 'staged patch missing V5 marker'),
+          error: 'STAGED_PATCH_INVALID'
+        };
+      }
+      const syntaxRes = this.validateSyntax(plan.stagedMainPath);
+      if (!syntaxRes.valid && syntaxRes.reason !== 'no_runtime') {
+        return {
+          success: false,
+          mainJsPath: plan.mainJsPath,
+          message: t('sw.syntaxCheckFailed'),
+          detail: syntaxRes.error,
+          error: 'SYNTAX_CHECK_FAILED'
+        };
+      }
+    } catch (err: any) {
+      return {
+        success: false,
+        mainJsPath: plan.mainJsPath,
+        message: t('sw.elevateFailed', err.message),
+        detail: err.message,
+        error: 'STAGED_PATCH_READ_FAILED'
+      };
+    }
+
+    let runRes: ElevateRunResult;
+    if (this.customElevateRunner) {
+      try {
+        runRes = await this.customElevateRunner(plan);
+      } catch (err: any) {
+        return {
+          success: false,
+          mainJsPath: plan.mainJsPath,
+          message: t('sw.elevateFailed', err.message),
+          detail: err.message,
+          error: 'ELEVATE_RUNNER_THROW'
+        };
+      }
+    } else {
+      const runDir = fs.mkdtempSync(path.join(path.dirname(plan.stagedMainPath), 'elevate-run-'));
+      const artifacts = buildElevationArtifacts(process.platform, plan, runDir);
+      try {
+        if (process.platform === 'win32') {
+          fs.writeFileSync(artifacts.scriptPath, '\uFEFF' + artifacts.scriptContent, 'utf8');
+        } else {
+          fs.writeFileSync(artifacts.scriptPath, artifacts.scriptContent, { encoding: 'utf8', mode: 0o700 });
+        }
+        runRes = await new Promise<ElevateRunResult>((resolve) => {
+          child_process.execFile(
+            artifacts.command,
+            artifacts.commandArgs,
+            { timeout: 120_000, windowsHide: true },
+            (err: any, stdout, stderr) => {
+              let errLog = '';
+              try {
+                if (fs.existsSync(artifacts.errLogPath)) {
+                  errLog = fs.readFileSync(artifacts.errLogPath, 'utf8').trim();
+                }
+              } catch { /* ignore */ }
+              const outStr = String(stdout || '').trim();
+              const errStr = [String(stderr || '').trim(), errLog, String(err?.message || '').trim()]
+                .filter(Boolean)
+                .join(' | ');
+              if (!err) {
+                resolve({ code: 0, stdout: outStr, stderr: errStr });
+                return;
+              }
+              if (err.code === 'ENOENT') {
+                resolve({ code: -1, stdout: outStr, stderr: `ENOENT:${artifacts.command}` });
+                return;
+              }
+              const exitCode = typeof err.code === 'number' ? err.code : 1;
+              const isCanceled =
+                exitCode === 126 ||
+                /canceled|cancelled|用户已取消|操作已被用户取消|-128/i.test(errStr);
+              resolve({ code: exitCode, cancelled: isCanceled, stdout: outStr, stderr: errStr });
+            }
+          );
+        });
+      } finally {
+        try { fs.rmSync(runDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      }
+    }
+
+    if (runRes.cancelled) {
+      return {
+        success: false,
+        cancelled: true,
+        mainJsPath: plan.mainJsPath,
+        message: t('sw.elevateCancelled'),
+        error: 'ELEVATION_CANCELLED'
+      };
+    }
+
+    if (runRes.stderr?.startsWith('ENOENT:')) {
+      const tool = runRes.stderr.slice('ENOENT:'.length);
+      return {
+        success: false,
+        mainJsPath: plan.mainJsPath,
+        message: t('sw.elevateUnsupported', tool),
+        detail: runRes.stderr,
+        error: 'ELEVATION_TOOL_MISSING'
+      };
+    }
+
+    if (runRes.code !== 0) {
+      return {
+        success: false,
+        mainJsPath: plan.mainJsPath,
+        message: t('sw.elevateFailed', runRes.stderr || `exit ${runRes.code}`),
+        detail: runRes.stderr || runRes.stdout,
+        error: 'ELEVATION_FAILED'
+      };
+    }
+
+    // 独立核验目标文件真实字节一致性，拒绝仅凭 exit 0 谎报成功
+    try {
+      const actualBytes = fs.readFileSync(plan.mainJsPath);
+      const patchedCheck = this.checkPatch(plan.mainJsPath);
+      const originReady = !plan.stagedOriginPath || !plan.originPath || fs.existsSync(plan.originPath);
+      if (Buffer.compare(actualBytes, expectedBytes) !== 0 || !patchedCheck.isPatched || !originReady) {
+        return {
+          success: false,
+          mainJsPath: plan.mainJsPath,
+          message: t('sw.elevateVerifyFailed'),
+          detail: `byteMatch=${Buffer.compare(actualBytes, expectedBytes) === 0}, isPatched=${patchedCheck.isPatched}, originReady=${originReady}`,
+          error: 'ELEVATION_VERIFY_FAILED'
+        };
+      }
+    } catch (err: any) {
+      return {
+        success: false,
+        mainJsPath: plan.mainJsPath,
+        message: t('sw.elevateVerifyFailed'),
+        detail: err.message,
+        error: 'ELEVATION_VERIFY_FAILED'
+      };
+    }
+
+    this.cleanupElevationPlan(plan);
+    return {
+      success: true,
+      mainJsPath: plan.mainJsPath,
+      message: t('sw.elevateSuccess')
+    };
+  }
+
+  /**
+   * 提权写入补丁成功后一并准备待切账号的会话映射与重启消费指令，
+   * 让用户授权 + 重启一次即可完成全部切换。
+   */
+  public async completeSwitchAfterElevation(
+    plan: ElevationPlan,
+    account?: CodeBuddyAccount,
+    _store?: AccountStore
+  ): Promise<ElevatedApplyResult & { switchReady?: boolean }> {
+    const applied = await this.applyElevatedPatch(plan);
+    if (!applied.success) {
+      return applied;
+    }
+    if (!account) {
+      return applied;
+    }
+
+    const junctionResult = this.ensureJunction(account.uid);
+    if (!junctionResult.success) {
+      return {
+        success: false,
+        mainJsPath: plan.mainJsPath,
+        message: junctionResult.message,
+        error: junctionResult.error || 'JUNCTION_FAILED'
+      };
+    }
+
+    try {
+      await this.writeSwitchCommand(account);
+    } catch (err: any) {
+      return {
+        success: false,
+        mainJsPath: plan.mainJsPath,
+        message: t('sw.cmdWriteFailed', err.message),
+        detail: err.message,
+        error: 'CMD_WRITE_FAILED'
+      };
+    }
+
+    return {
+      ...applied,
+      switchReady: true
     };
   }
 
@@ -1140,7 +1547,11 @@ export class SeamlessSwitcher {
           alreadyExisted: false,
           message: t('sw.patchHealFailed')
         },
-        message: t('sw.patchInjectFailed', patchResult.message),
+        needsElevation: patchResult.needsElevation,
+        elevationPlan: patchResult.elevationPlan,
+        message: patchResult.needsElevation
+          ? patchResult.message
+          : t('sw.patchInjectFailed', patchResult.message),
         error: patchResult.error,
         detail: patchResult.detail
       };
@@ -1327,11 +1738,16 @@ export class SeamlessSwitcher {
     });
 
     if (!hasR3) {
-      // 自动修复：重打补丁，随后同样需要完全重启加载
+      // 自动修复：重打补丁，随后同样需要完全重启加载；遇只读目录则交出单次提权计划
       const rep = this.healPatch(mainPath);
       if (!rep.success) {
         checks.push({ id: 'repair', ok: false, detail: rep.message });
-        return { status: 'repair_failed', checks, message: rep.message };
+        return {
+          status: rep.needsElevation ? 'needs_elevation' : 'repair_failed',
+          checks,
+          message: rep.message,
+          elevationPlan: rep.elevationPlan
+        };
       }
       checks.push({ id: 'repair', ok: true, detail: t('doctor.patchRepaired') });
       return { status: 'repaired_needs_full_restart', checks, message: t('doctor.repairedNeedsRestart') };

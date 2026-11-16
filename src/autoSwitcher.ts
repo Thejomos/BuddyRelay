@@ -259,6 +259,18 @@ export class AutoSwitcher extends EventEmitter {
       return;
     }
 
+    if (res.needsElevation) {
+      this.emit('needs_elevation', {
+        fromUid,
+        toUid: next.uid,
+        targetAccount: next,
+        reason,
+        res,
+        timestamp: Date.now()
+      });
+      return;
+    }
+
     if (res.needsFullRestart) {
       this.emit('needs_restart', {
         fromUid,

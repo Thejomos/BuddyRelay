@@ -89,7 +89,8 @@ export async function activate(context: vscode.ExtensionContext) {
     store,
     switcher,
     () => sidebarProvider.promptFullRestart(),
-    usageTracker
+    usageTracker,
+    (plan, account) => sidebarProvider.promptElevationAndApply(plan, account).then(() => {})
   );
 
   // 2.5 模型级 429 冷却：只监听宿主日志追加，撞到限流才记录并刷新侧栏与状态栏
@@ -133,6 +134,9 @@ export async function activate(context: vscode.ExtensionContext) {
       if (patchRes.repatched) {
         void sidebarProvider.promptNativeRestart(t('sw.restartHint'));
       }
+    } else if (patchRes.needsElevation && patchRes.elevationPlan) {
+      console.warn(`[BuddyRelay] Patch 需管理员授权写入: ${patchRes.message}`);
+      void sidebarProvider.promptElevationAndApply(patchRes.elevationPlan);
     } else {
       console.warn(`[BuddyRelay] Patch 自愈提示: ${patchRes.message}`);
     }
@@ -256,6 +260,10 @@ export async function activate(context: vscode.ExtensionContext) {
         async (progress) => {
           progress.report({ message: t('msg.progressPatch') });
           const res = await switcher.switchAccount(target!, store);
+          if (res.needsElevation && res.elevationPlan) {
+            await sidebarProvider.promptElevationAndApply(res.elevationPlan, target!);
+            return;
+          }
           if (res.needsFullRestart) {
             await sidebarProvider.promptFullRestart();
             return;
@@ -395,6 +403,13 @@ export async function activate(context: vscode.ExtensionContext) {
     if (now - lastAutoRestartHintAt >= 10 * 60 * 1000) {
       lastAutoRestartHintAt = now;
       void sidebarProvider.promptFullRestart();
+    }
+  });
+  autoSwitcher.on('needs_elevation', (ev: any) => {
+    const now = Date.now();
+    if (now - lastAutoRestartHintAt >= 10 * 60 * 1000 && ev?.res?.elevationPlan) {
+      lastAutoRestartHintAt = now;
+      void sidebarProvider.promptElevationAndApply(ev.res.elevationPlan, ev.targetAccount);
     }
   });
   autoSwitcher.on('rotation_failed', (ev: any) => {
