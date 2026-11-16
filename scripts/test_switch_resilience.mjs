@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import childProcess from 'node:child_process';
 import Module from 'node:module';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -95,7 +96,7 @@ async function run() {
 
   try {
     // ── 1. package.json Remote SSH UI 边界 ──
-    console.log('[测试 1/6] package.json extensionKind 边界');
+    console.log('[测试 1/7] package.json extensionKind 边界');
     const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
     check(
       'package.json 显式声明 extensionKind: ["ui"]',
@@ -104,7 +105,7 @@ async function run() {
     );
 
     // ── 2. 隐藏侧栏时 promptFullRestart 不得吞掉重启提示 ──
-    console.log('[测试 2/6] 隐藏侧栏时不吞重启提示');
+    console.log('[测试 2/7] 隐藏侧栏时不吞重启提示');
     const { AccountStore } = require(path.join(ROOT, 'out', 'accountStore.js'));
     const { SidebarProvider } = require(path.join(ROOT, 'out', 'sidebarProvider.js'));
     const { SeamlessSwitcher } = require(path.join(ROOT, 'out', 'seamlessSwitcher.js'));
@@ -119,40 +120,56 @@ async function run() {
       {},
       {}
     );
+    sp._relayDir = path.join(tmpDir, 'relay-sp');
+    const origChildSpawn = childProcess.spawn;
+    let helperSpawnCallCount = 0;
+    childProcess.spawn = () => {
+      helperSpawnCallCount++;
+      return { unref: () => {}, pid: 99999 };
+    };
     const postedToHiddenView = [];
     sp._view = {
       visible: false,
       webview: { postMessage: (m) => postedToHiddenView.push(m) }
     };
-    vscodeCalls.infoMessages = [];
-    vscodeCalls.executedCommands = [];
-    vscodeCalls.nextInfoChoice = undefined;
-    await sp.promptFullRestart();
-    check(
-      '侧栏隐藏时不得往不可见 webview 发 showRestartModal',
-      !postedToHiddenView.some((m) => m && m.command === 'showRestartModal'),
-      JSON.stringify(postedToHiddenView)
-    );
-    check(
-      '侧栏隐藏时弹出原生信息通知且带立即重启按钮',
-      vscodeCalls.infoMessages.length === 1 && vscodeCalls.infoMessages[0].items.length >= 1,
-      JSON.stringify(vscodeCalls.infoMessages)
-    );
+    try {
+      vscodeCalls.infoMessages = [];
+      vscodeCalls.executedCommands = [];
+      vscodeCalls.nextInfoChoice = undefined;
+      await sp.promptFullRestart();
+      check(
+        '侧栏隐藏时不得往不可见 webview 发 showRestartModal',
+        !postedToHiddenView.some((m) => m && m.command === 'showRestartModal'),
+        JSON.stringify(postedToHiddenView)
+      );
+      check(
+        '侧栏隐藏时弹出原生信息通知且带立即重启按钮',
+        vscodeCalls.infoMessages.length === 1 && vscodeCalls.infoMessages[0].items.length >= 1,
+        JSON.stringify(vscodeCalls.infoMessages)
+      );
 
-    // 用户点击原生通知上的第一个动作（立即重启）应触发退出命令
-    vscodeCalls.infoMessages = [];
-    vscodeCalls.executedCommands = [];
-    vscodeCalls.nextInfoChoice = '立即重启';
-    await sp.promptFullRestart();
-    check(
-      '原生重启通知点击「立即重启」触发 workbench.action.quit',
-      vscodeCalls.executedCommands.some((c) => c.cmd === 'workbench.action.quit'),
-      JSON.stringify(vscodeCalls.executedCommands)
-    );
+      // 用户点击原生通知上的第一个动作（立即重启）应触发退出命令并派发重启助手
+      vscodeCalls.infoMessages = [];
+      vscodeCalls.executedCommands = [];
+      vscodeCalls.nextInfoChoice = '立即重启';
+      await sp.promptFullRestart();
+      check(
+        '原生重启通知点击「立即重启」触发 workbench.action.quit',
+        vscodeCalls.executedCommands.some((c) => c.cmd === 'workbench.action.quit'),
+        JSON.stringify(vscodeCalls.executedCommands)
+      );
+      check(
+        '点击「立即重启」确实派发了重启助手',
+        helperSpawnCallCount === 1,
+        `helperSpawnCallCount=${helperSpawnCallCount}`
+      );
+    } finally {
+      childProcess.spawn = origChildSpawn;
+    }
     store1.dispose();
 
     // ── 3. AutoSwitcher 失败/需重启不得假发射 rotation ──
-    console.log('[测试 3/6] AutoSwitcher 失败与 needsFullRestart 不误报成功');
+    console.log('[测试 3/7] AutoSwitcher 失败与 needsFullRestart 不误报成功');
     const { AutoSwitcher } = require(path.join(ROOT, 'out', 'autoSwitcher.js'));
     const poolPath2 = path.join(tmpDir, 'pool-auto.json');
     const store2 = new AccountStore(undefined, poolPath2);
@@ -204,7 +221,7 @@ async function run() {
     store2.dispose();
 
     // ── 4. 重启消费待执行指令回执后对齐 AccountStore ──
-    console.log('[测试 4/6] 重启消费指令回执对齐号池');
+    console.log('[测试 4/7] 重启消费指令回执对齐号池');
     const { PATHS } = require(path.join(ROOT, 'out', 'constants.js'));
     const savedCmd = PATHS.BYOK_SWITCH_FILE;
     const savedReceipt = PATHS.BYOK_SWITCH_RESULT_FILE;
@@ -250,7 +267,7 @@ async function run() {
     }
 
     // ── 5. PATCH_V5 跨平台 dgw 与无硬编码作者 UID（含沙盒实跑） ──
-    console.log('[测试 5/6] PATCH_V5 跨平台 dgw 与动态母体读取');
+    console.log('[测试 5/7] PATCH_V5 跨平台 dgw 与动态母体读取');
     const { PATCH_V5 } = require(path.join(ROOT, 'out', 'constants.js'));
     check(
       'PATCH_V5.WATCHER_METHODS 不包含硬编码旧个人 UID',
@@ -308,7 +325,7 @@ async function run() {
     }
 
     // ── 6. atomicWrite 并发写零残骸与超龄清理 ──
-    console.log('[测试 6/6] atomicWrite 并发零残骸与超龄临时文件清理');
+    console.log('[测试 6/7] atomicWrite 并发零残骸与超龄临时文件清理');
     const atomicPath = path.join(ROOT, 'out', 'atomicWrite.js');
     const hasAtomic = fs.existsSync(atomicPath);
     check('atomicWrite 模块存在', hasAtomic);
@@ -334,6 +351,146 @@ async function run() {
       check('过期 0 字节 .tmp_ 已被清理', !fs.existsSync(staleTmp));
       check('刚创建的活跃 .tmp_ 未被误删', fs.existsSync(freshTmp));
     }
+
+    // ── 7. 重启助手环境清洗、多 PID 等待与早退重试（防 ELECTRON_RUN_AS_NODE 秒退） ──
+    console.log('[测试 7/7] 重启助手环境清洗与多 PID 等待');
+    const helperTestDir = path.join(tmpDir, 'restart-helper-test');
+    fs.mkdirSync(helperTestDir, { recursive: true });
+    const capturedHelperPath = path.join(helperTestDir, 'restart-helper.js');
+    let capturedSpawnArgs = [];
+    const origSpSpawn = childProcess.spawn;
+    const storeR = new AccountStore(undefined, path.join(tmpDir, 'pool-r.json'));
+    const spRestart = new SidebarProvider({ fsPath: ROOT }, storeR, new SeamlessSwitcher(), {}, {}, {});
+    spRestart._relayDir = helperTestDir;
+
+    childProcess.spawn = (_exe, args) => {
+      capturedSpawnArgs = args || [];
+      return { unref: () => {}, pid: 88888 };
+    };
+    const prevVsPid = process.env.VSCODE_PID;
+    process.env.VSCODE_PID = '54321';
+    try {
+      spRestart.spawnRestartHelper();
+    } finally {
+      childProcess.spawn = origSpSpawn;
+      storeR.dispose();
+      if (prevVsPid === undefined) delete process.env.VSCODE_PID;
+      else process.env.VSCODE_PID = prevVsPid;
+    }
+
+    check('生成了 restart-helper.js 到指定隔离目录', fs.existsSync(capturedHelperPath));
+    check(
+      'spawnRestartHelper 传入了包含 VSCODE_PID (54321) 的监控 PID 列表',
+      Array.isArray(capturedSpawnArgs) && String(capturedSpawnArgs[1] || '').includes('54321'),
+      `argv[1]=${capturedSpawnArgs[1]}`
+    );
+
+    // 真实在带 ELECTRON_RUN_AS_NODE=1 与脏 VSCODE_* 的子进程里运行生成出的 restart-helper.js
+    // 通过 preload 拦截最终对 target exe 的 spawn 调用，观测真实参数与时机
+    const preloadPath = path.join(helperTestDir, 'preload-spy.js');
+    const callsLogPath = path.join(helperTestDir, 'spawn-calls.json');
+    fs.writeFileSync(preloadPath, `
+const cp = require('child_process');
+const fs = require('fs');
+const { EventEmitter } = require('events');
+const callsFile = process.env.SPY_CALLS_FILE;
+const simulateEarlyExitOnce = process.env.SPY_EARLY_EXIT_ONCE === '1';
+let count = 0;
+cp.spawn = function(cmd, args, opts) {
+  count++;
+  const entry = {
+    ts: Date.now(),
+    attempt: count,
+    cmd,
+    args,
+    cwd: opts && opts.cwd,
+    windowsHide: opts && opts.windowsHide,
+    detached: opts && opts.detached,
+    stdio: opts && opts.stdio,
+    hasEnvObj: Boolean(opts && opts.env),
+    envRunAsNode: (opts && opts.env ? opts.env : process.env).ELECTRON_RUN_AS_NODE ?? null,
+    envNoAttachConsole: (opts && opts.env ? opts.env : process.env).ELECTRON_NO_ATTACH_CONSOLE ?? null,
+    envVscodePid: (opts && opts.env ? opts.env : process.env).VSCODE_PID ?? null,
+    envVscodeIpcHook: (opts && opts.env ? opts.env : process.env).VSCODE_IPC_HOOK ?? null,
+    envVscodeEntry: (opts && opts.env ? opts.env : process.env).VSCODE_ESM_ENTRYPOINT ?? null,
+    envUserKeep: (opts && opts.env ? opts.env : process.env).USER_KEEP_TEST_VAR ?? null
+  };
+  let arr = [];
+  try { arr = JSON.parse(fs.readFileSync(callsFile, 'utf8')); } catch {}
+  arr.push(entry);
+  fs.writeFileSync(callsFile, JSON.stringify(arr, null, 2), 'utf8');
+  const child = new EventEmitter();
+  child.pid = 70000 + count;
+  child.unref = () => {};
+  if (simulateEarlyExitOnce && count === 1) {
+    setTimeout(() => child.emit('exit', 0, null), 120);
+  }
+  return child;
+};
+`, 'utf8');
+
+    const runHelperCase = (pids, fakeExe, macBundle, extraEnv = {}) => new Promise((resolve) => {
+      try { fs.unlinkSync(callsLogPath); } catch {}
+      const child = origSpSpawn(
+        process.execPath,
+        ['-r', preloadPath, capturedHelperPath, pids, fakeExe, macBundle],
+        {
+          env: {
+            ...process.env,
+            ELECTRON_RUN_AS_NODE: '1',
+            VSCODE_PID: '54321',
+            VSCODE_IPC_HOOK: '\\\\.\\pipe\\stale-ipc',
+            VSCODE_ESM_ENTRYPOINT: 'vs/workbench/api/node/extensionHostProcess',
+            USER_KEEP_TEST_VAR: 'preserved',
+            SPY_CALLS_FILE: callsLogPath,
+            BUDDY_RELAY_HELPER_POLL_MS: '80',
+            BUDDY_RELAY_HELPER_SETTLE_MS: '250',
+            BUDDY_RELAY_HELPER_VERIFY_MS: '350',
+            BUDDY_RELAY_HELPER_RETRY_MS: '150',
+            ...extraEnv
+          },
+          stdio: 'pipe'
+        }
+      );
+      let out = '';
+      child.stdout?.on('data', (d) => { out += d; });
+      child.stderr?.on('data', (d) => { out += d; });
+      const timer = setTimeout(() => { try { child.kill(); } catch {} resolve({ code: -1, out, calls: [] }); }, 6000);
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        let calls = [];
+        try { calls = JSON.parse(fs.readFileSync(callsLogPath, 'utf8')); } catch {}
+        resolve({ code, out, calls });
+      });
+    });
+
+    // 场景 A: 启动两个短命进程 (p1 150ms 后死，p2 650ms 后死，严格长于 settle=250ms)，必须等两个全死 + 缓冲后才启动目标 exe
+    const sleeper1 = origSpSpawn(process.execPath, ['-e', 'setTimeout(() => {}, 150)'], { stdio: 'ignore' });
+    const sleeper2 = origSpSpawn(process.execPath, ['-e', 'setTimeout(() => {}, 650)'], { stdio: 'ignore' });
+    let sleeper2ExitAt = 0;
+    sleeper2.on('exit', () => { sleeper2ExitAt = Date.now(); });
+    const fakeExePath = path.join(helperTestDir, 'CodeBuddy CN.exe');
+    fs.writeFileSync(fakeExePath, '', 'utf8');
+
+    const resA = await runHelperCase(`${sleeper1.pid},${sleeper2.pid}`, fakeExePath, '');
+    const callA = resA.calls[0] || {};
+    check('场景A: 成功等待双 PID 退出后拉起宿主', resA.code === 0 && resA.calls.length === 1, `code=${resA.code} calls=${resA.calls.length} out=${resA.out}`);
+    check('场景A: 必须等最晚退出的主进程 PID 消失并经过缓冲期后才拉起', sleeper2ExitAt > 0 && callA.ts >= sleeper2ExitAt + 180, `exit=${sleeper2ExitAt}, launch=${callA.ts}`);
+    check('场景A: 必须清除 ELECTRON_RUN_AS_NODE（防止 GUI 秒退）', callA.envRunAsNode === null && callA.hasEnvObj === true, `envRunAsNode=${callA.envRunAsNode}`);
+    check('场景A: 设置 ELECTRON_NO_ATTACH_CONSOLE="1"', callA.envNoAttachConsole === '1', `noAttach=${callA.envNoAttachConsole}`);
+    check('场景A: 清除旧宿主 VSCODE_PID / VSCODE_IPC_HOOK / VSCODE_ESM_ENTRYPOINT', callA.envVscodePid === null && callA.envVscodeIpcHook === null && callA.envVscodeEntry === null, JSON.stringify(callA));
+    check('场景A: 保留用户常规环境变量且不隐藏新 GUI 窗口', callA.envUserKeep === 'preserved' && callA.windowsHide === false, JSON.stringify({ keep: callA.envUserKeep, hide: callA.windowsHide }));
+
+    // 场景 B: 首次拉起在 120ms 内早退（撞单实例锁 IPC 尾巴）自动退避重试一次
+    const sleeper3 = origSpSpawn(process.execPath, ['-e', 'setTimeout(() => {}, 100)'], { stdio: 'ignore' });
+    const resB = await runHelperCase(String(sleeper3.pid), fakeExePath, '', { SPY_EARLY_EXIT_ONCE: '1' });
+    check('场景B: 首次拉起早退时自动重试第 2 次并最终成功', resB.code === 0 && resB.calls.length === 2, `code=${resB.code} calls=${resB.calls.length}`);
+
+    // 场景 C: macOS .app bundle 启动 open -n -a 时同样清除 ELECTRON_RUN_AS_NODE
+    const sleeper4 = origSpSpawn(process.execPath, ['-e', 'setTimeout(() => {}, 100)'], { stdio: 'ignore' });
+    const resC = await runHelperCase(String(sleeper4.pid), fakeExePath, '/Applications/CodeBuddy CN.app');
+    const callC = resC.calls[0] || {};
+    check('场景C: macOS open -n -a 同样使用已清理 ELECTRON_RUN_AS_NODE 的环境', resC.calls.length === 1 && callC.cmd === 'open' && callC.envRunAsNode === null && callC.hasEnvObj === true, JSON.stringify(callC));
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
   }

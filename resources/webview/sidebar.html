@@ -4984,6 +4984,13 @@
         restartNowBtn.disabled = true;
         restartNowBtn.textContent = t('ui.restarting');
         vscode.postMessage({ command: 'restartApp' });
+        // 若用户因未保存文件取消了关闭，8 秒后恢复按钮状态
+        setTimeout(() => {
+          if (restartModalOverlay && !restartModalOverlay.hidden) {
+            restartNowBtn.disabled = false;
+            restartNowBtn.textContent = t('ui.restartNow');
+          }
+        }, 8000);
       });
     }
     if (restartLaterBtn) restartLaterBtn.addEventListener('click', hideRestartModal);
