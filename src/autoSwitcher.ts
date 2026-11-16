@@ -6,6 +6,7 @@ import { getOtherLockedUids } from './accountLock';
 import { API_ENDPOINTS } from './constants';
 import { UsageTracker } from './usageTracker';
 import { t } from './i18n';
+import { isCnAccount } from './domain';
 
 export type RotationStrategy = 'highest_quota' | 'lru' | 'round_robin' | 'health_priority';
 
@@ -121,14 +122,20 @@ export class AutoSwitcher extends EventEmitter {
    * 候选账号轻量探针预检（Tencent API 连通性与 Token 有效性检查）
    */
   public async probeAccount(account: CodeBuddyAccount): Promise<{ valid: boolean; reason?: string }> {
+    // 国际账号 (codebuddy.ai) 无国内签到/计费活动接口，严禁发往 codebuddy.cn 导致误判 401 失效
+    if (!isCnAccount(account.domain)) {
+      return { valid: true, reason: 'intl_skip_probe' };
+    }
     const url = `${API_ENDPOINTS.CODEBUDDY_CN_BASE}${API_ENDPOINTS.CHECKIN_ACTIVITY_STATUS}`;
     try {
       const res = await httpRequest(url, {
-        method: 'GET',
+        method: 'POST',
         headers: {
           'Authorization': `Bearer ${account.accessToken}`,
-          'X-User-Id': account.uid
+          'X-User-Id': account.uid,
+          'Content-Type': 'application/json'
         },
+        body: {},
         timeout: 6000
       });
 
@@ -158,12 +165,13 @@ export class AutoSwitcher extends EventEmitter {
     const now = Date.now();
     const otherLocked = getOtherLockedUids();
 
+    const activeId = this.store.getActive()?.id;
     const candidates: CodeBuddyAccount[] = [];
     for (const acc of all) {
       if (acc.status === 'rate_limited' && acc.rateLimitUntil && acc.rateLimitUntil <= now) {
-        acc.status = 'idle';
+        acc.status = activeId === acc.id ? 'active' : 'idle';
         delete acc.rateLimitUntil;
-        this.store.upsert(acc).catch(() => {});
+        this.store.clearRateLimit(acc.id).catch(() => {});
       }
 
       if (acc.status === 'disabled' || acc.status === 'expired') {

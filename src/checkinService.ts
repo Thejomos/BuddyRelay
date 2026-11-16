@@ -356,6 +356,32 @@ export class CheckinService {
     }
   }
 
+  private buildQuotaPatch(realQuota: DetailedQuotaResult | null): Partial<CodeBuddyAccount> {
+    if (!realQuota) {
+      return {};
+    }
+    return {
+      totalCredits: realQuota.totalCredits,
+      basePackage: realQuota.basePackage,
+      activityPackage: realQuota.activityPackage
+    };
+  }
+
+  private async persistCheckedFields(
+    store: AccountStore,
+    account: CodeBuddyAccount,
+    fields: Partial<Omit<CodeBuddyAccount, 'id'>>
+  ): Promise<void> {
+    if (typeof store.updateAccountFields === 'function') {
+      await store.updateAccountFields(account.id, fields);
+      return;
+    }
+    const latestStatus = typeof store.get === 'function'
+      ? (store.get(account.id)?.status ?? account.status)
+      : account.status;
+    await store.updateStatus(account.id, latestStatus, fields);
+  }
+
   /**
    * 3. 智能单账号签到：先查后签，同步更新 Store
    */
@@ -400,17 +426,10 @@ export class CheckinService {
         if (store) {
           // 余额必须来自 get-user-resource 实时资源包，绝不用签到活动累计值覆盖
           const realQuota = await this.queryRealRemainingQuota(account);
-          const quotaPatch = realQuota
-            ? {
-                totalCredits: realQuota.totalCredits,
-                basePackage: realQuota.basePackage,
-                activityPackage: realQuota.activityPackage
-              }
-            : {};
-          await store.updateStatus(account.id, account.status, {
+          await this.persistCheckedFields(store, account, {
             todayCheckedIn: true,
             checkinStreak: status.streakDays,
-            ...quotaPatch,
+            ...this.buildQuotaPatch(realQuota),
             lastCheckinDate: status.lastCheckinDate || todayCN(),
             lastCheckinTime: Date.now()
           });
@@ -424,17 +443,10 @@ export class CheckinService {
       if (execResult.success && store) {
         // 签到到账后重新拉取实时资源包余额（新领的算力会体现在资源包中）
         const realQuota = await this.queryRealRemainingQuota(account);
-        const quotaPatch = realQuota
-          ? {
-              totalCredits: realQuota.totalCredits,
-              basePackage: realQuota.basePackage,
-              activityPackage: realQuota.activityPackage
-            }
-          : {};
-        await store.updateStatus(account.id, account.status, {
+        await this.persistCheckedFields(store, account, {
           todayCheckedIn: true,
           checkinStreak: execResult.streakDays || status.streakDays + 1,
-          ...quotaPatch,
+          ...this.buildQuotaPatch(realQuota),
           lastCheckinDate: todayCN(),
           lastCheckinTime: Date.now()
         });
@@ -445,17 +457,10 @@ export class CheckinService {
       const execResult = await this.executeDailyCheckin(account);
       if (execResult.success && store) {
         const realQuota = await this.queryRealRemainingQuota(account);
-        const quotaPatch = realQuota
-          ? {
-              totalCredits: realQuota.totalCredits,
-              basePackage: realQuota.basePackage,
-              activityPackage: realQuota.activityPackage
-            }
-          : {};
-        await store.updateStatus(account.id, account.status, {
+        await this.persistCheckedFields(store, account, {
           todayCheckedIn: true,
           checkinStreak: execResult.streakDays,
-          ...quotaPatch,
+          ...this.buildQuotaPatch(realQuota),
           lastCheckinDate: todayCN(),
           lastCheckinTime: Date.now()
         });
@@ -473,15 +478,16 @@ export class CheckinService {
   ): Promise<CheckinStatusResult> {
     const status = await this.queryStatus(account);
     const realQuota = await this.queryRealRemainingQuota(account);
-    const finalCredits = realQuota ? realQuota.totalCredits : status.totalCredits;
+    const quotaPatch = this.buildQuotaPatch(realQuota);
+    const finalCredits = realQuota
+      ? realQuota.totalCredits
+      : (typeof account.totalCredits === 'number' ? account.totalCredits : 0);
 
     if (store) {
-      await store.updateStatus(account.id, account.status, {
+      await this.persistCheckedFields(store, account, {
         todayCheckedIn: status.todayCheckedIn,
         checkinStreak: status.streakDays,
-        totalCredits: finalCredits,
-        basePackage: realQuota?.basePackage,
-        activityPackage: realQuota?.activityPackage,
+        ...quotaPatch,
         lastCheckinDate: status.lastCheckinDate,
         lastCheckinTime: Date.now()
       });

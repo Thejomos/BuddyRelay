@@ -76,6 +76,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     // 注册 Webview 消息分发中枢
     webviewView.webview.onDidReceiveMessage(async (message) => {
+      try {
       switch (message.command) {
         case 'webviewReady':
           this.postStateToWebview();
@@ -213,6 +214,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           await openIssueReport(String(message.text || ''));
           break;
       }
+      } catch (err: any) {
+        this.sendNotify('error', err?.message || String(err));
+      }
     });
 
     // 每次面板由隐藏变可见时同步最新状态
@@ -260,7 +264,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       autoSwitchNotify: cfg.get<boolean>('autoSwitch.notifyOnSwitch', true),
       privacyModeDefault: cfg.get<boolean>('privacyModeDefault', false),
       updateAutoCheck: cfg.get<boolean>('update.autoCheck', true),
-      updateAutoInstall: cfg.get<boolean>('update.autoInstall', false),
+      updateAutoInstall: cfg.get<boolean>('update.autoInstall', true),
       locale: cfg.get<string>('locale', 'auto')
     };
 
@@ -761,7 +765,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
     const usageItems = this.store
       .getAll()
-      .filter((a) => typeof a.totalCredits === 'number')
+      .filter((a) => isCnAccount(a.domain) && typeof a.totalCredits === 'number')
       .map((a) => ({
         id: a.id,
         credits: a.totalCredits as number,
@@ -803,7 +807,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
     const eligible = this.store
       .getAll()
-      .filter((a) => a.accessToken && a.uid)
+      .filter((a) => isCnAccount(a.domain) && a.accessToken && a.uid)
       .map((a) => ({ id: a.id, token: a.accessToken || '', uid: a.uid || '' }));
     if (!eligible.length) {
       return;
@@ -1423,7 +1427,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const now = Date.now();
     const nickname = data.nickname || jwt?.nickname || data.email || jwt?.preferred_username || String(uid);
     const email = data.email || jwt?.preferred_username || data.nickname || String(uid);
-    const expiresAt = Number(data.expiresAt || data.expires_at || (jwt?.exp ? jwt.exp * 1000 : 0));
+    let expiresAt = Number(data.expiresAt || data.expires_at || (jwt?.exp ? jwt.exp * 1000 : 0));
+    if (Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt < 10000000000) {
+      expiresAt *= 1000;
+    }
 
     const account: CodeBuddyAccount = {
       id: data.id || `imported_${String(uid).slice(0, 8)}_${now}`,
@@ -1540,20 +1547,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
    */
   public async handleSaveSettings(settings: Record<string, any>): Promise<void> {
     if (!settings || typeof settings !== 'object') return;
+    const parseIntClamped = (raw: unknown, fallback: number, min: number, max: number): number => {
+      const n = Number(raw);
+      if (raw === '' || raw === null || raw === undefined || !Number.isFinite(n)) {
+        return fallback;
+      }
+      return Math.max(min, Math.min(max, Math.round(n)));
+    };
     const cfg = vscode.workspace.getConfiguration('buddyRelay');
     try {
       if ('autoCheckin' in settings) await cfg.update('autoCheckin', Boolean(settings.autoCheckin), vscode.ConfigurationTarget.Global);
       if ('dailyTime' in settings) await cfg.update('autoCheckin.dailyTime', String(settings.dailyTime || '00:10'), vscode.ConfigurationTarget.Global);
-      if ('randomJitterMinutes' in settings) await cfg.update('autoCheckin.randomJitterMinutes', Number(settings.randomJitterMinutes || 30), vscode.ConfigurationTarget.Global);
-      if ('perAccountDelaySeconds' in settings) await cfg.update('autoCheckin.perAccountDelaySeconds', Number(settings.perAccountDelaySeconds || 15), vscode.ConfigurationTarget.Global);
-      if ('refreshIntervalMinutes' in settings) await cfg.update('refreshIntervalMinutes', Number(settings.refreshIntervalMinutes || 15), vscode.ConfigurationTarget.Global);
+      if ('randomJitterMinutes' in settings) await cfg.update('autoCheckin.randomJitterMinutes', parseIntClamped(settings.randomJitterMinutes, 30, 0, 120), vscode.ConfigurationTarget.Global);
+      if ('perAccountDelaySeconds' in settings) await cfg.update('autoCheckin.perAccountDelaySeconds', parseIntClamped(settings.perAccountDelaySeconds, 15, 0, 60), vscode.ConfigurationTarget.Global);
+      if ('refreshIntervalMinutes' in settings) await cfg.update('refreshIntervalMinutes', parseIntClamped(settings.refreshIntervalMinutes, 15, 5, 120), vscode.ConfigurationTarget.Global);
       if ('growthTasksAutoAfterCheckin' in settings) await cfg.update('growthTasks.autoAfterCheckin', Boolean(settings.growthTasksAutoAfterCheckin), vscode.ConfigurationTarget.Global);
       if ('startupMakeup' in settings) await cfg.update('autoCheckin.startupMakeup', Boolean(settings.startupMakeup), vscode.ConfigurationTarget.Global);
       if ('autoUseMakeupCard' in settings) await cfg.update('growthTasks.autoUseMakeupCard', Boolean(settings.autoUseMakeupCard), vscode.ConfigurationTarget.Global);
       if ('autoSwitchEnabled' in settings) await cfg.update('autoSwitch.enabled', Boolean(settings.autoSwitchEnabled), vscode.ConfigurationTarget.Global);
-      if ('quotaThresholdPercent' in settings) await cfg.update('autoSwitch.quotaThresholdPercent', Number(settings.quotaThresholdPercent || 10), vscode.ConfigurationTarget.Global);
+      if ('quotaThresholdPercent' in settings) await cfg.update('autoSwitch.quotaThresholdPercent', parseIntClamped(settings.quotaThresholdPercent, 10, 0, 90), vscode.ConfigurationTarget.Global);
       if ('autoSwitchStrategy' in settings) await cfg.update('autoSwitch.strategy', String(settings.autoSwitchStrategy || 'highest_quota'), vscode.ConfigurationTarget.Global);
-      if ('cooldownMinutes' in settings) await cfg.update('autoSwitch.cooldownMinutes', Number(settings.cooldownMinutes || 5), vscode.ConfigurationTarget.Global);
+      if ('cooldownMinutes' in settings) await cfg.update('autoSwitch.cooldownMinutes', parseIntClamped(settings.cooldownMinutes, 5, 1, 60), vscode.ConfigurationTarget.Global);
       if ('autoSwitchOn429' in settings) await cfg.update('autoSwitch.on429', Boolean(settings.autoSwitchOn429), vscode.ConfigurationTarget.Global);
       if ('autoSwitchNotify' in settings) await cfg.update('autoSwitch.notifyOnSwitch', Boolean(settings.autoSwitchNotify), vscode.ConfigurationTarget.Global);
       if ('privacyModeDefault' in settings) await cfg.update('privacyModeDefault', Boolean(settings.privacyModeDefault), vscode.ConfigurationTarget.Global);

@@ -128,6 +128,7 @@ export class AccountStore extends EventEmitter {
   private _lastWrittenUpdatedAt: number = 0;
   private _reloadTimer: NodeJS.Timeout | null = null;
   private _retryTimer: NodeJS.Timeout | null = null;
+  private _watchRetryTimer: NodeJS.Timeout | null = null;
   private fileWatcher: fs.FSWatcher | null = null;
   private _watchDesired: boolean = false;
 
@@ -252,18 +253,18 @@ export class AccountStore extends EventEmitter {
    * 将账号池保存到共享号池文件（唯一权威，跨窗口可见）
    */
   public async persist(): Promise<void> {
-    const payload = {
-      version: '2.0',
-      updatedAt: Date.now(),
-      activeId: this.activeId,
-      privacyMode: this.privacyMode,
-      accounts: this.getAll()
-    };
-
     await this.enqueueWrite(async () => {
+      const updatedAt = Math.max(Date.now(), this._lastWrittenUpdatedAt + 1);
+      const payload = {
+        version: '2.0',
+        updatedAt,
+        activeId: this.activeId,
+        privacyMode: this.privacyMode,
+        accounts: this.getAll()
+      };
       const json = JSON.stringify(payload, null, 2);
       atomicWriteFileSync(this.poolFilePath, json);
-      this._lastWrittenUpdatedAt = payload.updatedAt;
+      this._lastWrittenUpdatedAt = updatedAt;
     });
 
     this.emit('change', this.getAll());
@@ -301,7 +302,9 @@ export class AccountStore extends EventEmitter {
         console.warn('[AccountStore] 号池 watcher 出错，1 秒后重试:', err);
         try { this.fileWatcher?.close(); } catch { /* ignore */ }
         this.fileWatcher = null;
-        setTimeout(() => {
+        if (this._watchRetryTimer) clearTimeout(this._watchRetryTimer);
+        this._watchRetryTimer = setTimeout(() => {
+          this._watchRetryTimer = null;
           if (this._watchDesired) {
             this._watchDesired = false;
             this.startWatcher();
@@ -373,6 +376,10 @@ export class AccountStore extends EventEmitter {
     if (this._retryTimer) {
       clearTimeout(this._retryTimer);
       this._retryTimer = null;
+    }
+    if (this._watchRetryTimer) {
+      clearTimeout(this._watchRetryTimer);
+      this._watchRetryTimer = null;
     }
     if (this.fileWatcher) {
       try { this.fileWatcher.close(); } catch { /* ignore */ }
@@ -559,6 +566,23 @@ export class AccountStore extends EventEmitter {
   }
 
   /**
+   * 仅更新账号配额/签到等扩展字段，不触碰 status 与 activeId
+   * 用于后台异步刷新完成回写时避免拿旧快照覆盖期间已发生的切号状态
+   */
+  public async updateAccountFields(
+    idOrUid: string,
+    fields: Partial<Omit<CodeBuddyAccount, 'id'>>
+  ): Promise<void> {
+    const acc = this.get(idOrUid);
+    if (!acc || !fields) return;
+    for (const [k, v] of Object.entries(fields)) {
+      if (k === 'id' || k === 'status' || v === undefined) continue;
+      (acc as any)[k] = v;
+    }
+    await this.persist();
+  }
+
+  /**
    * 切换账号启用/禁用状态 (disabled <-> idle)
    */
   public async toggleStatus(idOrUid: string): Promise<CodeBuddyAccount | undefined> {
@@ -650,8 +674,17 @@ export class AccountStore extends EventEmitter {
       return;
     }
 
+    const demoteOtherActives = (winnerId: string) => {
+      for (const acc of this.accounts.values()) {
+        if (acc.id !== winnerId && acc.status === 'active') {
+          acc.status = 'idle';
+        }
+      }
+    };
+
     const current = this.activeId ? this.accounts.get(this.activeId) : null;
     if (current && current.status === 'active') {
+      demoteOtherActives(current.id);
       return;
     }
 
@@ -659,11 +692,12 @@ export class AccountStore extends EventEmitter {
     for (const acc of this.accounts.values()) {
       if (acc.status === 'active') {
         this.activeId = acc.id;
+        demoteOtherActives(acc.id);
         return;
       }
     }
 
-    // 否则取第一个非 disabled/expired 的作为 active
+    // 否则取第一个非 disabled/expired 的作为 active（绝不强行激活已禁用/已失效账号）
     for (const acc of this.accounts.values()) {
       if (acc.status !== 'disabled' && acc.status !== 'expired') {
         acc.status = 'active';
@@ -672,11 +706,6 @@ export class AccountStore extends EventEmitter {
       }
     }
 
-    // 实在没有就取第一个
-    const first = this.accounts.values().next().value;
-    if (first) {
-      first.status = 'active';
-      this.activeId = first.id;
-    }
+    this.activeId = null;
   }
 }

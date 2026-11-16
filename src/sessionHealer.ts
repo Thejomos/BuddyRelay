@@ -299,8 +299,10 @@ export class SessionHealer {
       }
       const target = infos.find(i => i.uid === richest.uid)!.innerPath;
       try {
-        if (fs.existsSync(target)) {
-          if (isEmptyDir(target)) {
+        let targetLstat: fs.Stats | null = null;
+        try { targetLstat = fs.lstatSync(target); } catch { targetLstat = null; }
+        if (targetLstat) {
+          if (targetLstat.isSymbolicLink() || isEmptyDir(target)) {
             removeLink(target);
           } else {
             warnings.push(`目标路径已有非空目录，未覆盖: ${target}`);
@@ -372,7 +374,10 @@ export class SessionHealer {
         } catch {
           target = '';
         }
-        if (target && normalizeLinkTarget(path.resolve(target)) === normalizeLinkTarget(path.resolve(masterPath))) {
+        if (
+          target &&
+          normalizeLinkTarget(path.resolve(path.dirname(innerPath), target)) === normalizeLinkTarget(path.resolve(masterPath))
+        ) {
           continue;
         }
         try {
@@ -458,9 +463,8 @@ export class SessionHealer {
    * 返回 null 时调用方必须中止切号——绝不允许再造一个空母体把用户目录换走。
    */
   public resolveMasterForSwitch(): { masterUid: string; masterPath: string } | null {
-    const registered = this.readRegisteredMaster();
     const infos = this.scan();
-    const masterUid = registered || this.pickMaster(infos);
+    const masterUid = this.pickMaster(infos);
     if (!masterUid) {
       return null;
     }

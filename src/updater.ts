@@ -115,11 +115,17 @@ function downloadFile(
       }
 
       if (res.statusCode !== 200) {
+        res.resume();
         reject(new Error(t('upd.downloadFailed', res.statusCode ?? 0)));
         return;
       }
 
       const file = fs.createWriteStream(destPath);
+      res.on('error', err => {
+        file.destroy();
+        fs.unlink(destPath, () => {});
+        reject(err);
+      });
       res.pipe(file);
 
       file.on('finish', () => {
@@ -128,6 +134,7 @@ function downloadFile(
       });
 
       file.on('error', err => {
+        res.destroy();
         fs.unlink(destPath, () => {});
         reject(err);
       });
@@ -306,6 +313,7 @@ function fetchGitHubWebRedirect(): Promise<UnifiedReleaseInfo> {
       method: 'HEAD',
       headers: { 'User-Agent': 'BuddyRelay-Updater' }
     }, (res) => {
+      res.resume();
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         const m = res.headers.location.match(/\/tag\/v?([^\/]+)$/);
         if (m) {

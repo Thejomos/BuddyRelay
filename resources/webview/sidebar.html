@@ -4089,7 +4089,7 @@
         opt.className = 'filter-option';
         const active = activeTag === def.key;
         opt.innerHTML = '<span class="filter-option-check">' + (active ? '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' : '') + '</span>'
-          + '<span class="filter-option-label">' + def.label + '</span>'
+          + '<span class="filter-option-label">' + escHtml(def.label) + '</span>'
           + '<span class="filter-option-count">' + (counts[def.key] || 0) + '</span>';
         if (active) opt.style.color = 'var(--ac-emerald, #10b981)';
         opt.onclick = () => {
@@ -4282,7 +4282,7 @@
         }
 
         const tagsHtml = (acc.tags && acc.tags.length > 0)
-          ? `<div class="grid-card-tags">${acc.tags.map(tag => `<span class="grid-card-tag" onclick="event.stopPropagation();onFilterByTag('${escHtml(tag)}')">${escHtml(tag)}</span>`).join('')}</div>`
+          ? `<div class="grid-card-tags">${acc.tags.map(tag => `<span class="grid-card-tag" data-tag="${escHtml(tag)}">${escHtml(tag)}</span>`).join('')}</div>`
           : '';
 
         const cleanNotes = (acc.notes && !acc.notes.includes('额度见底标记') && !acc.notes.includes('探针预检失败'))
@@ -4327,7 +4327,7 @@
         return `
           <div class="grid-card ${isActive ? 'is-active' : ''} ${isDisabled ? 'is-disabled' : ''}" data-id="${acc.id}">
             <div class="grid-card-head">
-              <div class="grid-card-email" title="${escHtml(rawName)}">${displayName}</div>
+              <div class="grid-card-email" title="${escHtml(rawName)}">${escHtml(displayName)}</div>
               ${isActive ? '<span class="grid-active-tag">' + escHtml(t('js.currentSuffix').trim()) + '</span>' : (isDisabled ? '<span class="grid-disabled-tag">' + escHtml(t('js.disabled')) + '</span>' : '')}
             </div>
 
@@ -4398,6 +4398,12 @@
 
     if (accountGrid) {
       accountGrid.addEventListener('click', (e) => {
+        const tagEl = e.target.closest ? e.target.closest('.grid-card-tag') : null;
+        if (tagEl) {
+          e.stopPropagation();
+          onFilterByTag(tagEl.dataset.tag || '');
+          return;
+        }
         const resetBtn = e.target.closest ? e.target.closest('#btnResetFilter') : null;
         if (resetBtn) {
           activeTag = 'all';
@@ -4407,6 +4413,7 @@
           searchInput.value = '';
           searchQuery = '';
           searchClear.hidden = true;
+          renderTagBar();
           renderCards();
           return;
         }

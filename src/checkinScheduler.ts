@@ -12,6 +12,8 @@ export class CheckinScheduler {
   private store: AccountStore;
   private checkinService: CheckinService;
   private scheduleTimer: NodeJS.Timeout | null = null;
+  private retryTimer: NodeJS.Timeout | null = null;
+  private active = false;
   private running = false;
   private retryCount = 0;
   private onSummary:
@@ -37,8 +39,10 @@ export class CheckinScheduler {
    */
   public start(): void {
     this.stop();
+    this.active = true;
     const delayMs = this.computeNextRunDelayMs();
     if (delayMs === null) {
+      this.active = false;
       return;
     }
     const nextAt = new Date(Date.now() + delayMs);
@@ -46,16 +50,24 @@ export class CheckinScheduler {
       `[BuddyRelay][CheckinScheduler] 下一次自动签到: ${nextAt.toLocaleString()}`
     );
     this.scheduleTimer = setTimeout(async () => {
+      this.scheduleTimer = null;
       await this.runScheduledCheckin();
-      // 运行完毕后自动调度下一天
-      this.start();
+      // 运行完毕后仅在未被 stop() 时自动调度下一天
+      if (this.active) {
+        this.start();
+      }
     }, delayMs);
   }
 
   public stop(): void {
+    this.active = false;
     if (this.scheduleTimer) {
       clearTimeout(this.scheduleTimer);
       this.scheduleTimer = null;
+    }
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
     }
   }
 
@@ -174,14 +186,20 @@ export class CheckinScheduler {
       }
 
       // 失败重试（指数退避：5/10/15 分钟）
-      if (failed.length > 0 && this.retryCount < 3) {
+      if (failed.length > 0 && this.retryCount < 3 && this.active) {
         this.retryCount++;
         const backoffMin = 5 * this.retryCount;
         console.log(
           `[BuddyRelay][CheckinScheduler] ${failed.length} 个账号签到失败，${backoffMin} 分钟后重试 (${this.retryCount}/3)`
         );
-        setTimeout(async () => {
-          await this.runScheduledCheckin();
+        if (this.retryTimer) {
+          clearTimeout(this.retryTimer);
+        }
+        this.retryTimer = setTimeout(async () => {
+          this.retryTimer = null;
+          if (this.active) {
+            await this.runScheduledCheckin();
+          }
         }, backoffMin * 60 * 1000);
       } else {
         this.retryCount = 0;

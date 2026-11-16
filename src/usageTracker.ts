@@ -367,12 +367,11 @@ export class UsageTracker {
       'Content-Type': 'application/json',
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     };
-    const d = new Date();
-    const p2 = (n: number) => String(n).padStart(2, '0');
-    const todayStr = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+    const cnNow = new Date(Date.now() + 8 * 3600 * 1000);
+    const todayStr = cnNow.toISOString().slice(0, 10);
     const dateStr = targetDate || todayStr;
     const isToday = dateStr === todayStr;
-    const dayStart = new Date(dateStr + ' 00:00:00').getTime();
+    const dayStart = new Date(`${dateStr}T00:00:00+08:00`).getTime();
     const dayEnd = dayStart + 86400_000;
 
     // 1. 查消耗明细（自动翻页）
@@ -384,6 +383,7 @@ export class UsageTracker {
         const res = await fetch('https://www.codebuddy.cn/billing/meter/get-user-request-usage', {
           method: 'POST',
           headers,
+          signal: AbortSignal.timeout(15000),
           body: JSON.stringify({
             startTime: dateStr + ' 00:00:00',
             endTime: dateStr + ' 23:59:59',
@@ -418,6 +418,7 @@ export class UsageTracker {
         const res = await fetch('https://www.codebuddy.cn/v2/billing/meter/get-user-resource', {
           method: 'POST',
           headers,
+          signal: AbortSignal.timeout(15000),
           body: JSON.stringify({
             PageNumber: 1,
             PageSize: 100,
@@ -756,8 +757,8 @@ export class UsageTracker {
     const perAccountConsumed = sameDay ? { ...this.dailyStats.perAccountConsumed } : {};
     const perAccountGrants = sameDay ? { ...this.dailyStats.perAccountGrants } : {};
 
-    // 每月 1 号基础体验包重置基数：每号 500
-    const dayOfMonth = new Date(today).getDate();
+    // 每月 1 号基础体验包重置基数：每号 500（按日期串直接解析，避免 UTC 偏移误判成上月最后一天）
+    const dayOfMonth = Number(today.slice(8, 10));
     const isFirstDayOfMonth = dayOfMonth === 1;
     const firstDayBonus = isFirstDayOfMonth ? Math.max(0, activeAccountCount) * 500 : 0;
     const totalAwarded = Math.round((grants + firstDayBonus) * 100) / 100;

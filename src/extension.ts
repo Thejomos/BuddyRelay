@@ -19,6 +19,7 @@ import { detectHostEdition } from './host';
 let checkinTimer: NodeJS.Timeout | null = null;
 let quotaRefreshTimer: NodeJS.Timeout | null = null;
 let reconcileTimer: NodeJS.Timeout | null = null;
+let startupTimers: NodeJS.Timeout[] = [];
 let checkinScheduler: CheckinScheduler | null = null;
 let statusBarManager: StatusBarManager | null = null;
 let autoSwitcherInstance: AutoSwitcher | null = null;
@@ -45,7 +46,7 @@ export async function activate(context: vscode.ExtensionContext) {
   usageTrackerInstance = usageTracker;
   const autoSwitcher = new AutoSwitcher(store, switcher, oauthService, { usageTracker });
   autoSwitcherInstance = autoSwitcher;
-  const checkinScheduler = new CheckinScheduler(store, checkinService);
+  checkinScheduler = new CheckinScheduler(store, checkinService);
 
   // 1.5 跨窗口账号锁：初始化并为当前活跃账号持锁 (心跳自动续期，退出释放)
   const windowName = t('common.window', vscode.env.sessionId.slice(0, 8).toUpperCase());
@@ -146,8 +147,12 @@ export async function activate(context: vscode.ExtensionContext) {
       sidebarProvider.postStateToWebview();
     }
   };
-  switcher.reconcilePendingSwitch(store, pendingStartupTs ?? undefined).then(syncReconciledUi).catch(() => {});
-  if (pendingStartupTs !== null) {
+  let firstAligned: CodeBuddyAccount | null = null;
+  try {
+    firstAligned = await switcher.reconcilePendingSwitch(store, pendingStartupTs ?? undefined);
+    syncReconciledUi(firstAligned);
+  } catch {}
+  if (!firstAligned && pendingStartupTs !== null) {
     let attempts = 0;
     reconcileTimer = setInterval(async () => {
       attempts++;
@@ -203,9 +208,9 @@ export async function activate(context: vscode.ExtensionContext) {
     } catch (_) {}
   } else {
     // 号池非空时，静默后台同步一次各账号配额与签到状态
-    setTimeout(() => {
+    startupTimers.push(setTimeout(() => {
       checkinService.batchSyncStatus(store.getAll(), store).catch(() => {});
-    }, 2000);
+    }, 2000));
   }
 
   // 5. 注册命令列表
@@ -358,9 +363,9 @@ export async function activate(context: vscode.ExtensionContext) {
   // 6. 启动时后台静默检查更新 (延迟 8 秒，避免抢占启动资源)
   const updateCfg = vscode.workspace.getConfiguration('buddyRelay.update');
   if (updateCfg.get<boolean>('autoCheck', true)) {
-    setTimeout(() => {
+    startupTimers.push(setTimeout(() => {
       checkForUpdates(true).catch(() => {});
-    }, 8000);
+    }, 8000));
   }
 
   // 7. 自动轮换事件 → webview toast 通知（仅真切换成功才发成功通知）
@@ -400,6 +405,20 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // 7. 定时任务：定点自动签到 + 额度守卫自动切换 + 配额刷新
   setupScheduledTasks(store, checkinService, autoSwitcher, checkinScheduler, sidebarProvider, usageTracker);
+
+  // 配置热更新：签到配置变化时重排调度器（纳入 subscriptions 防扩展停用泄漏）
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
+    if (e.affectsConfiguration('buddyRelay.autoCheckin')) {
+      const cfg = vscode.workspace.getConfiguration('buddyRelay');
+      if (cfg.get<boolean>('autoCheckin', true)) {
+        checkinScheduler?.start();
+        console.log('[BuddyRelay] 自动签到配置变更，调度器已重排');
+      } else {
+        checkinScheduler?.stop();
+        console.log('[BuddyRelay] 自动签到已关闭，调度器停止');
+      }
+    }
+  }));
 
   console.log('[BuddyRelay] 界面与调度体系已就绪');
 }
@@ -450,9 +469,9 @@ function setupScheduledTasks(
 
   // 2. 启动时漏签兜底（覆盖"关机错过定点"的场景）
   if (config.get<boolean>('autoCheckin', true) && config.get<boolean>('autoCheckin.startupMakeup', true)) {
-    setTimeout(async () => {
+    startupTimers.push(setTimeout(async () => {
       await performDailyCheckinIfNeeded(store, checkinService);
-    }, 5000);
+    }, 5000));
   }
 
   // 3. 每 4 小时跨天漏签守护（兜底中的兜底）
@@ -504,20 +523,6 @@ function setupScheduledTasks(
       statusBarManager?.update();
     } catch (_) {}
   }, refreshMinutes * 60 * 1000);
-
-  // 7. 配置热更新：签到配置变化时重排调度器
-  vscode.workspace.onDidChangeConfiguration(e => {
-    if (e.affectsConfiguration('buddyRelay.autoCheckin')) {
-      const cfg = vscode.workspace.getConfiguration('buddyRelay');
-      if (cfg.get<boolean>('autoCheckin', true)) {
-        checkinScheduler.start();
-        console.log('[BuddyRelay] 自动签到配置变更，调度器已重排');
-      } else {
-        checkinScheduler.stop();
-        console.log('[BuddyRelay] 自动签到已关闭，调度器停止');
-      }
-    }
-  });
 }
 
 /**
@@ -555,6 +560,10 @@ async function performDailyCheckinIfNeeded(
 }
 
 export function deactivate() {
+  for (const timer of startupTimers) {
+    clearTimeout(timer);
+  }
+  startupTimers = [];
   if (reconcileTimer) {
     clearInterval(reconcileTimer);
     reconcileTimer = null;

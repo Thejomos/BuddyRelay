@@ -710,7 +710,7 @@ export class SeamlessSwitcher {
       }
       const pointingHere =
         currentTarget &&
-        normalizeLinkTarget(path.resolve(currentTarget)) === normalizeLinkTarget(path.resolve(masterPath));
+        normalizeLinkTarget(path.resolve(path.dirname(targetLink), currentTarget)) === normalizeLinkTarget(path.resolve(masterPath));
       if (pointingHere) {
         return {
           success: true,
@@ -739,6 +739,18 @@ export class SeamlessSwitcher {
         };
       }
     } else if (fs.existsSync(targetLink)) {
+      let targetStat: fs.Stats | null = null;
+      try { targetStat = fs.lstatSync(targetLink); } catch { targetStat = null; }
+      if (targetStat && !targetStat.isDirectory()) {
+        return {
+          success: false,
+          masterPath,
+          targetPath: targetLink,
+          alreadyExisted: false,
+          message: t('sw.symlinkFailed', `目标路径已被非目录文件占用: ${targetLink}`),
+          error: 'TARGET_NOT_DIRECTORY'
+        };
+      }
       // 普通物理目录：先把内容合并进母体，再改名留底，最后才建链
       const entries = fs.readdirSync(targetLink);
       if (entries.length > 0) {
@@ -925,7 +937,7 @@ export class SeamlessSwitcher {
     timeoutMs: number = 8000,
     expectedUid: string = ''
   ): Promise<SwitchReceipt> {
-    const cmdFile = PATHS.BYOK_SWITCH_FILE;
+    const cmdFile = this.customCmdPath || PATHS.BYOK_SWITCH_FILE;
     const receiptFile = PATHS.BYOK_SWITCH_RESULT_FILE;
     const start = Date.now();
     let consumed = false;
